@@ -1,0 +1,15 @@
+# Every deployed app. Each cloud's Terraform stack deploys the entries listing that cloud.
+#
+#   name    short, lowercase, hyphens allowed; becomes the service name and database name
+#   clouds  any of: aws, azure, gcp, oci
+#   image   GitHub Container Registry image published by the app repo's publish workflow
+#   tag     an immutable sha-<commit> tag (never "latest", so deploys are repeatable)
+#   domain  custom domain once its DNS record exists at Network Solutions; null = cloud default URL
+#   ai      "demo" (recorded answers) or "gemini"
+apps:
+  - name: template
+    clouds: [aws, azure, gcp, oci]
+    image: ghcr.io/breakthrudevelopment/30-apps-template
+    tag: sha-01cd5b3
+    domain: null
+    ai: demo

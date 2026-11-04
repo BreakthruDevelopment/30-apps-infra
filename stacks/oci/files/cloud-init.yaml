@@ -1,0 +1,50 @@
+#cloud-config
+# Ubuntu 24.04 on the Always Free Ampere VM: Docker, then the sync agent on a timer.
+
+package_update: true
+packages:
+  - docker.io
+  - docker-compose-v2
+  - python3-yaml
+
+write_files:
+  - path: /opt/30apps/agent.py
+    permissions: "0755"
+    content: |
+      ${indent(6, agent)}
+
+  - path: /etc/systemd/system/30apps-agent.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Sync containers with the 30 apps catalog
+      Wants=network-online.target
+      After=network-online.target docker.service
+
+      [Service]
+      Type=oneshot
+      Environment=CATALOG_URL=${catalog_url}
+      ExecStart=/usr/bin/python3 /opt/30apps/agent.py
+
+  - path: /etc/systemd/system/30apps-agent.timer
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Run the 30 apps sync agent every two minutes
+
+      [Timer]
+      OnBootSec=30
+      OnUnitActiveSec=120
+
+      [Install]
+      WantedBy=timers.target
+
+runcmd:
+  # Oracle's Ubuntu images ship iptables rules that reject everything but SSH.
+  - iptables -I INPUT 1 -p tcp --dport 80 -j ACCEPT
+  - iptables -I INPUT 1 -p tcp --dport 443 -j ACCEPT
+  - netfilter-persistent save || true
+  - systemctl enable --now docker
+  - systemctl daemon-reload
+  - systemctl enable --now 30apps-agent.timer
+  - systemctl start --no-block 30apps-agent.service
