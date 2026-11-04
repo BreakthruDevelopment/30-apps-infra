@@ -72,8 +72,9 @@ fi
 
 # --- API signing key ----------------------------------------------------------
 mkdir -p "$KEY_DIR" && chmod 700 "$KEY_DIR"
-EXISTING_KEYS="$(oci iam user api-key list --user-id "$USER_ID" --query 'length(data)' --raw-output)"
-if [ "$EXISTING_KEYS" = "0" ]; then
+# The CLI prints nothing (not an empty list) when the user has no keys, so check for a fingerprint instead.
+EXISTING_FINGERPRINT="$(oci iam user api-key list --user-id "$USER_ID" --query 'data[0].fingerprint' --raw-output 2>/dev/null || true)"
+if [ -z "$EXISTING_FINGERPRINT" ] || [ "$EXISTING_FINGERPRINT" = "null" ]; then
   openssl genrsa -out "$KEY_DIR/key.pem" 2048 2>/dev/null
   chmod 600 "$KEY_DIR/key.pem"
   openssl rsa -pubout -in "$KEY_DIR/key.pem" -out "$KEY_DIR/key_public.pem" 2>/dev/null
@@ -81,7 +82,7 @@ if [ "$EXISTING_KEYS" = "0" ]; then
     --query 'data.fingerprint' --raw-output)"
   NEW_KEY=1
 else
-  FINGERPRINT="$(oci iam user api-key list --user-id "$USER_ID" --query 'data[0].fingerprint' --raw-output)"
+  FINGERPRINT="$EXISTING_FINGERPRINT"
   NEW_KEY=0
 fi
 
