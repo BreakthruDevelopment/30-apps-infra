@@ -17,6 +17,13 @@ REPO="30-apps-infra"
 REGION="us-central1"   # one of the always-free regions
 PROJECT="${1:-$(gcloud config get-value project 2>/dev/null || true)}"
 
+# GitHub orgs using immutable subject claims send "repo:ORG@<owner id>/REPO@<repo id>:...".
+# Trust both that form and the plain one, so either setting works.
+GH_IDS="$(curl -fsSL "https://api.github.com/repos/${ORG}/${REPO}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["owner"]["id"], d["id"])')"
+OWNER_ID="${GH_IDS% *}"
+REPO_ID="${GH_IDS#* }"
+ID_PREFIX="repo:${ORG}@${OWNER_ID}/${REPO}@${REPO_ID}"
+
 if [ -z "$PROJECT" ]; then
   echo "Pass your project ID: ... | bash -s -- YOUR_PROJECT_ID"
   echo "Your projects:"; gcloud projects list --format='table(projectId,name)'
@@ -64,9 +71,13 @@ ensure_sa gh-30apps-plan "GitHub Actions plan (30-apps-infra, pull requests)"
 DEPLOY_SA="gh-30apps-deploy@${PROJECT}.iam.gserviceaccount.com"
 PLAN_SA="gh-30apps-plan@${PROJECT}.iam.gserviceaccount.com"
 
-grant() {
-  gcloud projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$1" --role="$2" \
-    --condition=None >/dev/null
+grant() {  # retries: brand-new service accounts take a few seconds to be visible to IAM
+  for _ in 1 2 3 4 5 6; do
+    gcloud projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$1" --role="$2" \
+      --condition=None >/dev/null 2>&1 && return 0
+    sleep 10
+  done
+  gcloud projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$1" --role="$2" --condition=None >/dev/null
 }
 for r in roles/editor roles/run.admin roles/iam.serviceAccountUser roles/secretmanager.admin; do grant "$DEPLOY_SA" "$r"; done
 for r in roles/viewer roles/secretmanager.secretAccessor; do grant "$PLAN_SA" "$r"; done
@@ -77,6 +88,11 @@ gcloud iam service-accounts add-iam-policy-binding "$DEPLOY_SA" --role=roles/iam
   --member="${PRINCIPAL}/repo:${ORG}/${REPO}:environment:production" >/dev/null
 gcloud iam service-accounts add-iam-policy-binding "$PLAN_SA" --role=roles/iam.workloadIdentityUser \
   --member="${PRINCIPAL}/repo:${ORG}/${REPO}:pull_request" >/dev/null
+gcloud iam service-accounts add-iam-policy-binding "$DEPLOY_SA" --role=roles/iam.workloadIdentityUser \
+  --member="${PRINCIPAL}/${ID_PREFIX}:environment:production" >/dev/null
+gcloud iam service-accounts add-iam-policy-binding "$PLAN_SA" --role=roles/iam.workloadIdentityUser \
+  --member="${PRINCIPAL}/${ID_PREFIX}:pull_request" >/dev/null
+echo "GitHub trust configured for ${ID_PREFIX} and repo:${ORG}/${REPO}"
 echo "Service accounts and bindings ready"
 
 cat <<EOF
