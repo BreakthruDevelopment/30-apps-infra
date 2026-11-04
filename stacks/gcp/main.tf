@@ -90,17 +90,10 @@ resource "google_artifact_registry_repository" "apps" {
 
 # --- Postgres VM ------------------------------------------------------------------------
 
-resource "google_service_account" "postgres" {
-  account_id   = "postgres-vm"
-  display_name = "Postgres VM (pulls its image from Artifact Registry)"
-}
-
-resource "google_artifact_registry_repository_iam_member" "postgres_pull" {
-  repository = google_artifact_registry_repository.apps.name
-  location   = var.region
-  role       = "roles/artifactregistry.reader"
-  member     = "serviceAccount:${google_service_account.postgres.email}"
-}
+# The Compute default service account can already read this project's images, so the VM
+# uses it; granting a dedicated account access would need IAM-admin rights the deploy
+# identity deliberately doesn't have.
+data "google_compute_default_service_account" "default" {}
 
 resource "random_password" "pg" {
   length  = 32
@@ -132,7 +125,7 @@ resource "google_compute_instance" "postgres" {
   }
 
   service_account {
-    email  = google_service_account.postgres.email
+    email  = data.google_compute_default_service_account.default.email
     scopes = ["cloud-platform"]
   }
 
@@ -153,7 +146,6 @@ resource "google_compute_instance" "postgres" {
     ignore_changes = [boot_disk[0].initialize_params[0].image]
   }
 
-  depends_on = [google_artifact_registry_repository_iam_member.postgres_pull]
 }
 
 # --- Cloud Run apps -----------------------------------------------------------------------

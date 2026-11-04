@@ -12,7 +12,7 @@ variable "location" {
 variable "pg_location" {
   description = "Region for Postgres. New subscriptions are sometimes blocked from a region for Flexible Server; change this if creation fails with a location restriction."
   type        = string
-  default     = "eastus"
+  default     = "centralus" # eastus, eastus2, westus2, southcentralus don't offer B1ms to this subscription
 }
 
 variable "max_instances" {
