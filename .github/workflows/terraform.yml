@@ -219,7 +219,22 @@ jobs:
           -backend-config="fingerprint=${{ vars.OCI_FINGERPRINT }}"
           -backend-config="private_key_path=${TF_VAR_private_key_path}"
           -backend-config="auth=APIKey"
-      - run: terraform apply -auto-approve -no-color
+      - name: Apply (trying each availability domain)
+        # Free Ampere capacity is often sold out in one availability domain; try each in turn.
+        run: |
+          for ad in 0 1 2; do
+            echo "::group::Availability domain index $ad"
+            if terraform apply -auto-approve -no-color -var "availability_domain_index=$ad" 2>&1 | tee "$RUNNER_TEMP/apply.log"; then
+              echo "::endgroup::"; exit 0
+            fi
+            echo "::endgroup::"
+            if ! grep -q "Out of host capacity" "$RUNNER_TEMP/apply.log"; then
+              echo "Apply failed for a reason other than capacity; not retrying."; exit 1
+            fi
+            echo "No Ampere capacity in availability domain $ad."
+          done
+          echo "::error::No free Ampere capacity in any availability domain right now. Rerun this workflow later."
+          exit 1
       - name: Where the apps will appear
         run: |
           terraform output
