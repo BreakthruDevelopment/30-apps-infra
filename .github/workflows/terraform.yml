@@ -46,6 +46,8 @@ jobs:
   plan-azure:
     name: Plan azure
     if: github.event_name == 'pull_request'
+    # Read-only identities can't create the state file, so plans only work after the first apply.
+    continue-on-error: true
     needs: validate
     runs-on: ubuntu-24.04
     env:
@@ -63,7 +65,7 @@ jobs:
         with:
           terraform_version: "^1.12.0"
       - run: >-
-          terraform init
+          terraform init -lock=false
           -backend-config="resource_group_name=${{ vars.AZURE_STATE_RG }}"
           -backend-config="storage_account_name=${{ vars.AZURE_STATE_ACCOUNT }}"
           -backend-config="container_name=tfstate"
@@ -75,6 +77,8 @@ jobs:
   plan-gcp:
     name: Plan gcp
     if: github.event_name == 'pull_request'
+    # Read-only identities can't create the state file, so plans only work after the first apply.
+    continue-on-error: true
     needs: validate
     runs-on: ubuntu-24.04
     env:
@@ -93,7 +97,7 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "^1.12.0"
-      - run: terraform init -backend-config="bucket=${{ vars.GCP_STATE_BUCKET }}" -backend-config="prefix=gcp"
+      - run: terraform init -lock=false -backend-config="bucket=${{ vars.GCP_STATE_BUCKET }}" -backend-config="prefix=gcp"
       - run: terraform plan -lock=false -no-color
 
   apply-azure:
@@ -219,7 +223,22 @@ jobs:
           -backend-config="fingerprint=${{ vars.OCI_FINGERPRINT }}"
           -backend-config="private_key_path=${TF_VAR_private_key_path}"
           -backend-config="auth=APIKey"
-      - run: terraform apply -auto-approve -no-color
+      - name: Apply (trying each availability domain)
+        # Free Ampere capacity is often sold out in one availability domain; try each in turn.
+        run: |
+          for ad in 0 1 2; do
+            echo "::group::Availability domain index $ad"
+            if terraform apply -auto-approve -no-color -var "availability_domain_index=$ad" 2>&1 | tee "$RUNNER_TEMP/apply.log"; then
+              echo "::endgroup::"; exit 0
+            fi
+            echo "::endgroup::"
+            if ! grep -q "Out of host capacity" "$RUNNER_TEMP/apply.log"; then
+              echo "Apply failed for a reason other than capacity; not retrying."; exit 1
+            fi
+            echo "No Ampere capacity in availability domain $ad."
+          done
+          echo "::error::No free Ampere capacity in any availability domain right now. Rerun this workflow later."
+          exit 1
       - name: Where the apps will appear
         run: |
           terraform output
