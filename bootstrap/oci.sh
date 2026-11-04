@@ -21,6 +21,8 @@ GROUP="30apps-deployers"
 USER_NAME="github-30apps-deploy"
 BUCKET="tfstate-30apps"
 KEY_DIR="$HOME/.oci-30apps"
+# Identity domains require an email per user; a plus-address lands in the dev@ inbox.
+DEPLOY_EMAIL="${OCI_DEPLOY_EMAIL:-dev+github-30apps@breakthruventures.ai}"
 
 HOME_REGION="$(oci iam region-subscription list --query "data[?\"is-home-region\"].\"region-name\" | [0]" --raw-output)"
 if [ "$REGION" != "$HOME_REGION" ]; then
@@ -49,7 +51,8 @@ fi
 USER_ID="$(first iam user list --compartment-id "$TENANCY" --name "$USER_NAME")"
 if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
   USER_ID="$(oci iam user create --compartment-id "$TENANCY" --name "$USER_NAME" \
-    --description "Used only by GitHub Actions in BreakthruDevelopment/30-apps-infra" --query 'data.id' --raw-output)"
+    --description "Used only by GitHub Actions in BreakthruDevelopment/30-apps-infra" \
+    --email "$DEPLOY_EMAIL" --query 'data.id' --raw-output)"
   oci iam group add-user --group-id "$GROUP_ID" --user-id "$USER_ID" >/dev/null
   echo "Created user ${USER_NAME}"
 fi
