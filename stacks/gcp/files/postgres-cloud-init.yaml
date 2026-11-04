@@ -1,0 +1,72 @@
+#cloud-config
+# Container-Optimized OS: runs Postgres in Docker with data on the stateful partition,
+# and a timer that creates any database listed in the VM's app-databases metadata.
+
+write_files:
+  - path: /etc/systemd/system/postgres.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Postgres for the 30 apps portfolio
+      Wants=network-online.target
+      After=network-online.target docker.service
+
+      [Service]
+      Environment=HOME=/home/cloudservice
+      ExecStartPre=/usr/bin/docker-credential-gcr configure-docker --registries ${registry}
+      ExecStartPre=-/usr/bin/docker rm -f postgres
+      ExecStart=/usr/bin/docker run --rm --name postgres -p 5432:5432 \
+        -e POSTGRES_PASSWORD=${password} \
+        -v /mnt/stateful_partition/pgdata:/var/lib/postgresql/data \
+        ${image} -c max_connections=60 -c shared_buffers=96MB
+      ExecStop=/usr/bin/docker stop postgres
+      Restart=always
+      RestartSec=10
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/app-databases.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Create databases listed in instance metadata
+      After=postgres.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/bash /var/lib/app-databases.sh
+
+  - path: /etc/systemd/system/app-databases.timer
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Check for new app databases every minute
+
+      [Timer]
+      OnBootSec=60
+      OnUnitActiveSec=60
+
+      [Install]
+      WantedBy=timers.target
+
+  - path: /var/lib/app-databases.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -u
+      list=$(curl -fsS -H 'Metadata-Flavor: Google' \
+        http://metadata.google.internal/computeMetadata/v1/instance/attributes/app-databases || true)
+      [ -z "$list" ] && exit 0
+      for db in $${list//,/ }; do
+        exists=$(docker exec postgres psql -U postgres -tAc "select 1 from pg_database where datname='$db'" 2>/dev/null)
+        if [ "$exists" != "1" ]; then
+          docker exec postgres createdb -U postgres "$db" && echo "created database $db"
+        fi
+      done
+
+runcmd:
+  - mkdir -p /mnt/stateful_partition/pgdata
+  - systemctl daemon-reload
+  - systemctl start postgres.service
+  - systemctl start app-databases.timer

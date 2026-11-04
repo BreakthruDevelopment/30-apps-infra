@@ -17,6 +17,13 @@ REPO="30-apps-infra"
 LOCATION="eastus"
 RG="rg-30apps-shared"
 
+# GitHub orgs using immutable subject claims send "repo:ORG@<owner id>/REPO@<repo id>:...".
+# Trust both that form and the plain one, so either setting works.
+GH_IDS="$(curl -fsSL "https://api.github.com/repos/${ORG}/${REPO}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["owner"]["id"], d["id"])')"
+OWNER_ID="${GH_IDS% *}"
+REPO_ID="${GH_IDS#* }"
+ID_PREFIX="repo:${ORG}@${OWNER_ID}/${REPO}@${REPO_ID}"
+
 SUB="$(az account show --query id -o tsv)"
 TENANT="$(az account show --query tenantId -o tsv)"
 SA="tf30apps$(echo "$SUB" | tr -d '-' | cut -c1-12)"
@@ -47,14 +54,18 @@ ensure_app() {  # $1 display name, $2 credential name, $3 subject → prints app
     app="$(az ad app create --display-name "$1" --query appId -o tsv)"
   fi
   az ad sp show --id "$app" -o none 2>/dev/null || az ad sp create --id "$app" -o none
-  if ! az ad app federated-credential list --id "$app" --query "[?name=='$2'].name" -o tsv | grep -q .; then
-    az ad app federated-credential create --id "$app" -o none --parameters "{
+  add_cred "$app" "$2" "$3"
+  echo "$app"
+}
+
+add_cred() {  # $1 appId, $2 credential name, $3 subject
+  if ! az ad app federated-credential list --id "$1" --query "[?name=='$2'].name" -o tsv | grep -q .; then
+    az ad app federated-credential create --id "$1" -o none --parameters "{
       \"name\": \"$2\",
       \"issuer\": \"https://token.actions.githubusercontent.com\",
       \"subject\": \"$3\",
       \"audiences\": [\"api://AzureADTokenExchange\"]}"
   fi
-  echo "$app"
 }
 
 assign() {  # $1 appId, $2 role, $3 scope
@@ -66,6 +77,9 @@ assign() {  # $1 appId, $2 role, $3 scope
 
 DEPLOY_APP="$(ensure_app github-30apps-deploy production "repo:${ORG}/${REPO}:environment:production")"
 PLAN_APP="$(ensure_app github-30apps-plan pull-request "repo:${ORG}/${REPO}:pull_request")"
+add_cred "$DEPLOY_APP" production-ids "${ID_PREFIX}:environment:production"
+add_cred "$PLAN_APP" pull-request-ids "${ID_PREFIX}:pull_request"
+echo "GitHub trust configured for ${ID_PREFIX} and repo:${ORG}/${REPO}"
 
 # New service principals take a few seconds to appear for role assignment.
 sleep 20

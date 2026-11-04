@@ -26,3 +26,26 @@ tokens (no stored keys on AWS, Azure or Google Cloud; a narrowly scoped key on O
 | Oracle Cloud | Cloud Shell | `curl -fsSL https://raw.githubusercontent.com/BreakthruDevelopment/30-apps-infra/main/bootstrap/oci.sh \| bash` |
 
 Each script is safe to rerun, prints exactly what it created, and creates nothing that costs money.
+
+## How deploys work
+
+`apps.yaml` lists every app, the clouds it runs on and the exact image tag. Changing it is how you deploy.
+
+| Cloud | Runs on | Database | Deployed by |
+| --- | --- | --- | --- |
+| Azure | Container Apps (always-free grant) | Flexible Server B1ms (free 12 months) | GitHub Actions on merge to `main` |
+| Google Cloud | Cloud Run in us-central1 (always-free) | Postgres on the always-free e2-micro, private network only | GitHub Actions on merge to `main` |
+| Oracle Cloud | Docker + Caddy on the Always Free Ampere VM | Postgres on the same VM | GitHub Actions builds the VM once; an agent on the VM syncs with `apps.yaml` every 2 minutes |
+| AWS | Lambda + API Gateway (us-east-2) | RDS db.t4g.micro (from Free plan credits) | One command in AWS CloudShell, below |
+
+Every app is capped at one instance (`max_instances = 1`) so nothing grows past a free limit.
+
+**AWS** (this account's guardrails block GitHub sign-in, and the Free plan is kept so it can never bill):
+
+```
+curl -fsSL https://raw.githubusercontent.com/BreakthruDevelopment/30-apps-infra/main/deploy/aws.sh | bash
+```
+
+**Default URLs** until an app gets a custom domain: Azure `https://app-<name>.<env>.eastus.azurecontainerapps.io`,
+Google Cloud `https://<name>-<project-number>.us-central1.run.app`, Oracle `https://<name>.<ip-with-dashes>.sslip.io`,
+AWS `https://<id>.execute-api.us-east-2.amazonaws.com`. Each deploy prints them.

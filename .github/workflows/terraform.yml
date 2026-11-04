@@ -1,0 +1,229 @@
+name: Terraform
+
+# Pull requests: format check and validation for all four stacks, plus a read-only plan
+#   for Azure and Google Cloud (Oracle's key is readable only from main, so OCI is validated).
+# main: apply Azure, Google Cloud and Oracle from the "production" environment.
+# AWS is applied from AWS CloudShell with deploy/aws.sh (see README).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # keyless sign-in to Azure and Google Cloud
+
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  validate:
+    name: Validate ${{ matrix.stack }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [aws, azure, gcp, oci]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "^1.12.0"
+      - run: terraform fmt -check -recursive
+        working-directory: stacks/${{ matrix.stack }}
+      - run: terraform init -backend=false
+        working-directory: stacks/${{ matrix.stack }}
+      - run: terraform validate
+        working-directory: stacks/${{ matrix.stack }}
+
+  plan-azure:
+    name: Plan azure
+    if: github.event_name == 'pull_request'
+    needs: validate
+    runs-on: ubuntu-24.04
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_PLAN_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+    defaults:
+      run:
+        working-directory: stacks/azure
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "^1.12.0"
+      - run: >-
+          terraform init
+          -backend-config="resource_group_name=${{ vars.AZURE_STATE_RG }}"
+          -backend-config="storage_account_name=${{ vars.AZURE_STATE_ACCOUNT }}"
+          -backend-config="container_name=tfstate"
+          -backend-config="key=azure.tfstate"
+          -backend-config="use_oidc=true"
+          -backend-config="use_azuread_auth=true"
+      - run: terraform plan -lock=false -no-color
+
+  plan-gcp:
+    name: Plan gcp
+    if: github.event_name == 'pull_request'
+    needs: validate
+    runs-on: ubuntu-24.04
+    env:
+      TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+      TF_VAR_project_number: ${{ vars.GCP_PROJECT_NUMBER }}
+      TF_VAR_region: ${{ vars.GCP_REGION }}
+    defaults:
+      run:
+        working-directory: stacks/gcp
+    steps:
+      - uses: actions/checkout@v5
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_PLAN_SA }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "^1.12.0"
+      - run: terraform init -backend-config="bucket=${{ vars.GCP_STATE_BUCKET }}" -backend-config="prefix=gcp"
+      - run: terraform plan -lock=false -no-color
+
+  apply-azure:
+    name: Apply azure
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: ubuntu-24.04
+    environment: production
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_DEPLOY_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_location: ${{ vars.AZURE_LOCATION }}
+    defaults:
+      run:
+        working-directory: stacks/azure
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "^1.12.0"
+          terraform_wrapper: false
+      - run: >-
+          terraform init
+          -backend-config="resource_group_name=${{ vars.AZURE_STATE_RG }}"
+          -backend-config="storage_account_name=${{ vars.AZURE_STATE_ACCOUNT }}"
+          -backend-config="container_name=tfstate"
+          -backend-config="key=azure.tfstate"
+          -backend-config="use_oidc=true"
+          -backend-config="use_azuread_auth=true"
+      - run: terraform apply -auto-approve -no-color
+      - name: Health check
+        run: bash ../../deploy/health.sh "$(terraform output -json urls)"
+
+  apply-gcp:
+    name: Apply gcp
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: ubuntu-24.04
+    environment: production
+    env:
+      TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+      TF_VAR_project_number: ${{ vars.GCP_PROJECT_NUMBER }}
+      TF_VAR_region: ${{ vars.GCP_REGION }}
+    defaults:
+      run:
+        working-directory: stacks/gcp
+    steps:
+      - uses: actions/checkout@v5
+      - uses: google-github-actions/auth@v2
+        id: auth
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+          token_format: access_token
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "^1.12.0"
+          terraform_wrapper: false
+      - run: terraform init -backend-config="bucket=${{ vars.GCP_STATE_BUCKET }}" -backend-config="prefix=gcp"
+      - name: Create the image registry
+        run: terraform apply -auto-approve -no-color -target=google_artifact_registry_repository.apps
+      - name: Copy images into Artifact Registry
+        env:
+          REGISTRY: ${{ vars.GCP_REGION }}-docker.pkg.dev
+          TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: |
+          curl -fsSL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz \
+            | tar -xz -C "$RUNNER_TEMP" crane
+          export PATH="$RUNNER_TEMP:$PATH"
+          echo "$TOKEN" | crane auth login "$REGISTRY" -u oauth2accesstoken --password-stdin
+          REPO="$REGISTRY/${TF_VAR_project_id}/apps"
+          # Postgres for the database VM, plus every Google Cloud app (x86 builds, which Cloud Run runs).
+          crane copy --platform linux/amd64 docker.io/library/postgres:17-alpine "$REPO/postgres:17-alpine"
+          yq -o=json '.apps[] | select(.clouds[] == "gcp")' ../../apps.yaml | jq -c '.' | while read -r app; do
+            name=$(jq -r .name <<<"$app"); image=$(jq -r .image <<<"$app"); tag=$(jq -r .tag <<<"$app")
+            echo "copy $image:$tag -> $REPO/$name:$tag"
+            crane copy --platform linux/amd64 "$image:$tag" "$REPO/$name:$tag"
+          done
+      - run: terraform apply -auto-approve -no-color
+      - name: Health check
+        run: bash ../../deploy/health.sh "$(terraform output -json urls)"
+
+  apply-oci:
+    name: Apply oci
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: ubuntu-24.04
+    environment: production
+    env:
+      TF_VAR_tenancy_ocid: ${{ vars.OCI_TENANCY_OCID }}
+      TF_VAR_user_ocid: ${{ vars.OCI_USER_OCID }}
+      TF_VAR_fingerprint: ${{ vars.OCI_FINGERPRINT }}
+      TF_VAR_region: ${{ vars.OCI_REGION }}
+      TF_VAR_compartment_ocid: ${{ vars.OCI_COMPARTMENT_OCID }}
+    defaults:
+      run:
+        working-directory: stacks/oci
+    steps:
+      - uses: actions/checkout@v5
+      - name: Write the API key for this run only
+        env:
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+        run: |
+          umask 077
+          key="$RUNNER_TEMP/oci_api_key.pem"
+          printf '%s\n' "$OCI_PRIVATE_KEY" > "$key"
+          echo "TF_VAR_private_key_path=$key" >> "$GITHUB_ENV"
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "^1.12.0"
+          terraform_wrapper: false
+      - run: >-
+          terraform init
+          -backend-config="bucket=${{ vars.OCI_STATE_BUCKET }}"
+          -backend-config="namespace=${{ vars.OCI_NAMESPACE }}"
+          -backend-config="key=oci/terraform.tfstate"
+          -backend-config="region=${{ vars.OCI_REGION }}"
+          -backend-config="tenancy_ocid=${{ vars.OCI_TENANCY_OCID }}"
+          -backend-config="user_ocid=${{ vars.OCI_USER_OCID }}"
+          -backend-config="fingerprint=${{ vars.OCI_FINGERPRINT }}"
+          -backend-config="private_key_path=${TF_VAR_private_key_path}"
+          -backend-config="auth=APIKey"
+      - run: terraform apply -auto-approve -no-color
+      - name: Where the apps will appear
+        run: |
+          terraform output
+          echo "The VM's agent starts the apps within a few minutes of first boot."
+      - name: Remove the key
+        if: always()
+        run: rm -f "$TF_VAR_private_key_path"

@@ -1,0 +1,198 @@
+# Azure: each app runs on Container Apps (always-free grant) against one shared
+# Postgres Flexible Server (B1ms, free for 12 months on a free account).
+
+terraform {
+  required_version = ">= 1.12"
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = ">= 4.20, < 5.0"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
+  }
+  # Filled in by -backend-config in CI (storage account, container, key).
+  backend "azurerm" {}
+}
+
+provider "azurerm" {
+  features {}
+  subscription_id = var.subscription_id
+  # The bootstrap registered the providers this stack needs; don't try to register all of them.
+  resource_provider_registrations = "none"
+}
+
+locals {
+  catalog = yamldecode(file("${path.module}/../../apps.yaml")).apps
+  apps    = { for a in local.catalog : a.name => a if contains(a.clouds, "azure") }
+  tags    = { project = "30-apps-30-days", managed_by = "terraform" }
+}
+
+resource "random_string" "suffix" {
+  length  = 6
+  special = false
+  upper   = false
+}
+
+resource "azurerm_resource_group" "apps" {
+  name     = "rg-30apps-apps"
+  location = var.location
+  tags     = local.tags
+}
+
+# --- Shared Postgres -----------------------------------------------------------
+
+resource "random_password" "pg" {
+  length  = 32
+  special = false
+}
+
+resource "azurerm_postgresql_flexible_server" "main" {
+  name                          = "pg-30apps-${random_string.suffix.result}"
+  resource_group_name           = azurerm_resource_group.apps.name
+  location                      = var.pg_location
+  version                       = "16"
+  sku_name                      = "B_Standard_B1ms"
+  storage_mb                    = 32768
+  backup_retention_days         = 7
+  geo_redundant_backup_enabled  = false
+  public_network_access_enabled = true
+  administrator_login           = "pgadmin"
+  administrator_password        = random_password.pg.result
+  tags                          = local.tags
+
+  lifecycle {
+    # Azure picks an availability zone at creation; don't fight it afterwards.
+    ignore_changes = [zone]
+  }
+}
+
+# Container Apps on the consumption plan have no fixed outbound IPs, so allow Azure-hosted
+# clients. Connections still need the password and TLS (sslmode=require).
+resource "azurerm_postgresql_flexible_server_firewall_rule" "azure_services" {
+  name             = "AllowAzureServices"
+  server_id        = azurerm_postgresql_flexible_server.main.id
+  start_ip_address = "0.0.0.0"
+  end_ip_address   = "0.0.0.0"
+}
+
+resource "azurerm_postgresql_flexible_server_database" "app" {
+  for_each  = local.apps
+  name      = replace(each.key, "-", "_")
+  server_id = azurerm_postgresql_flexible_server.main.id
+  charset   = "UTF8"
+  collation = "en_US.utf8"
+}
+
+# --- Container Apps ---------------------------------------------------------------
+
+# No Log Analytics workspace: it bills per GB. Logs are still visible live in the portal.
+resource "azurerm_container_app_environment" "main" {
+  name                = "cae-30apps"
+  resource_group_name = azurerm_resource_group.apps.name
+  location            = azurerm_resource_group.apps.location
+  tags                = local.tags
+}
+
+resource "random_password" "auth" {
+  for_each = local.apps
+  length   = 48
+  special  = false
+}
+
+locals {
+  app_url = {
+    for name, a in local.apps : name => (
+      try(a.domain, null) != null
+      ? "https://${a.domain}"
+      : "https://app-${name}.${azurerm_container_app_environment.main.default_domain}"
+    )
+  }
+  database_url = {
+    for name, a in local.apps : name => format(
+      "postgres://pgadmin:%s@%s:5432/%s?sslmode=require",
+      random_password.pg.result,
+      azurerm_postgresql_flexible_server.main.fqdn,
+      azurerm_postgresql_flexible_server_database.app[name].name,
+    )
+  }
+}
+
+resource "azurerm_container_app" "app" {
+  for_each                     = local.apps
+  name                         = "app-${each.key}"
+  container_app_environment_id = azurerm_container_app_environment.main.id
+  resource_group_name          = azurerm_resource_group.apps.name
+  revision_mode                = "Single"
+  tags                         = local.tags
+
+  secret {
+    name  = "database-url"
+    value = local.database_url[each.key]
+  }
+  secret {
+    name  = "auth-secret"
+    value = random_password.auth[each.key].result
+  }
+
+  ingress {
+    external_enabled = true
+    target_port      = 3000
+    transport        = "auto"
+    traffic_weight {
+      latest_revision = true
+      percentage      = 100
+    }
+  }
+
+  template {
+    min_replicas = 0
+    max_replicas = var.max_instances
+
+    container {
+      name   = "app"
+      image  = "${each.value.image}:${each.value.tag}"
+      cpu    = 0.25
+      memory = "0.5Gi"
+
+      env {
+        name        = "DATABASE_URL"
+        secret_name = "database-url"
+      }
+      env {
+        name        = "BETTER_AUTH_SECRET"
+        secret_name = "auth-secret"
+      }
+      env {
+        name  = "APP_URL"
+        value = local.app_url[each.key]
+      }
+      env {
+        name  = "APP_NAME"
+        value = try(each.value.title, each.key)
+      }
+      env {
+        name  = "APP_VERSION"
+        value = each.value.tag
+      }
+      env {
+        name  = "CLOUD"
+        value = "azure"
+      }
+      env {
+        name  = "MIGRATE_ON_START"
+        value = "true"
+      }
+      env {
+        name  = "AI_PROVIDER"
+        value = try(each.value.ai, "demo")
+      }
+      env {
+        name  = "DB_POOL_MAX"
+        value = "3"
+      }
+    }
+  }
+}
