@@ -14,7 +14,9 @@ set -euo pipefail
 
 ORG="BreakthruDevelopment"
 REPO="30-apps-infra"
-REGION="us-east-1"   # CloudFront certificates must live in us-east-1, so everything does.
+# The AWS account is in a project whose policy allows only us-east-2, so everything lives there.
+# Custom domains use a regional certificate on API Gateway rather than CloudFront (which needs us-east-1).
+REGION="${AWS_TARGET_REGION:-us-east-2}"
 export AWS_REGION="$REGION" AWS_DEFAULT_REGION="$REGION"
 
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
@@ -26,7 +28,11 @@ echo "Account ${ACCOUNT}, region ${REGION}"
 if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
   echo "State bucket exists: $BUCKET"
 else
-  aws s3api create-bucket --bucket "$BUCKET" >/dev/null
+  if [ "$REGION" = "us-east-1" ]; then
+    aws s3api create-bucket --bucket "$BUCKET" >/dev/null
+  else
+    aws s3api create-bucket --bucket "$BUCKET" --create-bucket-configuration "LocationConstraint=$REGION" >/dev/null
+  fi
   echo "Created state bucket: $BUCKET"
 fi
 aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
