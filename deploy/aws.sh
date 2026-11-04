@@ -25,6 +25,14 @@ BUCKET="breakthru-30apps-tfstate-${ACCOUNT}"
 REGISTRY="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
 echo "==> Account ${ACCOUNT}, region ${REGION}"
 
+# Gemini key, stored once with:
+#   aws ssm put-parameter --name /30apps/gemini_api_key --type SecureString --value "<key>"
+# Without it, apps that ask for Gemini run on demo answers.
+TF_VAR_gemini_api_key="$(aws ssm get-parameter --name /30apps/gemini_api_key --with-decryption \
+  --query Parameter.Value --output text 2>/dev/null || true)"
+export TF_VAR_gemini_api_key
+if [ -n "$TF_VAR_gemini_api_key" ]; then echo "==> Gemini key found"; else echo "==> No Gemini key in Parameter Store; AI runs in demo mode"; fi
+
 case "$(uname -m)" in
   x86_64) TF_ARCH=amd64; CRANE_ARCH=x86_64 ;;
   aarch64 | arm64) TF_ARCH=arm64; CRANE_ARCH=arm64 ;;

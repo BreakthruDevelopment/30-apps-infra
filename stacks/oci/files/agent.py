@@ -32,6 +32,19 @@ TAG_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 COMPOSE = ["docker", "compose", "-p", "30apps", "-f", COMPOSE_FILE]
 
 
+
+def ai_provider(app):
+    """Gemini only when shared.env holds a key; the app refuses to start otherwise."""
+    wanted = str(app.get("ai", "demo"))
+    if wanted != "gemini":
+        return wanted
+    try:
+        with open(SHARED_ENV) as f:
+            has_key = any(line.startswith("GEMINI_API_KEY=") and line.strip() != "GEMINI_API_KEY=" for line in f)
+    except OSError:
+        has_key = False
+    return "gemini" if has_key else "demo"
+
 def log(msg, **fields):
     print(json.dumps({"msg": msg, **fields}), flush=True)
 
@@ -150,7 +163,7 @@ def main():
             "APP_VERSION": str(a["tag"]),
             "CLOUD": "oci",
             "MIGRATE_ON_START": "true",
-            "AI_PROVIDER": str(a.get("ai", "demo")),
+            "AI_PROVIDER": ai_provider(a),
             "DB_POOL_MAX": "5",
         }
         env_path = os.path.join(ENV_DIR, f"{name}.env")

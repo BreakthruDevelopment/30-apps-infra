@@ -46,6 +46,11 @@ Every app is capped at one instance (`max_instances = 1`) so nothing grows past 
 curl -fsSL https://raw.githubusercontent.com/BreakthruDevelopment/30-apps-infra/main/deploy/aws.sh | bash
 ```
 
+**Gemini key:** apps with `ai: gemini` get the key from the `GEMINI_API_KEY` secret in the `production`
+environment (Azure, Google Cloud) or from AWS Parameter Store (`/30apps/gemini_api_key`, read by `deploy/aws.sh`).
+Without a key they serve demo answers. The Oracle VM reads it from `/opt/30apps/env/shared.env`, which isn't
+set up yet, so Oracle apps run on demo answers for now.
+
 **Default URLs** until an app gets a custom domain: Azure `https://app-<name>.<env>.eastus.azurecontainerapps.io`,
 Google Cloud `https://<name>-<project-number>.us-central1.run.app`, Oracle `https://<name>.<ip-with-dashes>.sslip.io`,
 AWS `https://<id>.execute-api.us-east-2.amazonaws.com`. Each deploy prints them.

@@ -176,7 +176,7 @@ resource "aws_lambda_function" "app" {
   timeout       = 29
 
   environment {
-    variables = {
+    variables = merge(contains(local.gemini_apps, each.key) ? { GEMINI_API_KEY = var.gemini_api_key } : {}, {
       DATABASE_URL = format("postgres://pgadmin:%s@%s:5432/%s?sslmode=require",
       random_password.pg.result, aws_db_instance.main.address, postgresql_database.app[each.key].name)
       BETTER_AUTH_SECRET = random_password.auth[each.key].result
@@ -185,13 +185,13 @@ resource "aws_lambda_function" "app" {
       APP_VERSION        = each.value.tag
       CLOUD              = "aws"
       MIGRATE_ON_START   = "true"
-      AI_PROVIDER        = try(each.value.ai, "demo")
+      AI_PROVIDER        = local.ai_provider[each.key]
       DB_POOL_MAX        = "2"
       # Lambda Web Adapter: forward to the Next.js server on 3000; "/" is a static page,
       # so the function becomes ready even if the database is briefly unreachable.
       AWS_LWA_PORT                 = "3000"
       AWS_LWA_READINESS_CHECK_PATH = "/"
-    }
+    })
   }
 
   depends_on = [aws_iam_role_policy_attachment.lambda_logs, aws_cloudwatch_log_group.app]
@@ -231,4 +231,13 @@ resource "aws_lambda_permission" "api" {
   function_name = aws_lambda_function.app[each.key].function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.app[each.key].execution_arn}/*"
+}
+
+locals {
+  # An app that asks for Gemini runs on demo answers until the key is configured; the app
+  # refuses to start with AI_PROVIDER=gemini and no key.
+  ai_provider = { for name, a in local.apps : name => (
+    try(a.ai, "demo") == "gemini" && var.gemini_api_key == "" ? "demo" : try(a.ai, "demo")
+  ) }
+  gemini_apps = toset([for name, p in local.ai_provider : name if p == "gemini"])
 }

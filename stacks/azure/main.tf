@@ -136,6 +136,13 @@ resource "azurerm_container_app" "app" {
     name  = "auth-secret"
     value = random_password.auth[each.key].result
   }
+  dynamic "secret" {
+    for_each = contains(local.gemini_apps, each.key) ? [1] : []
+    content {
+      name  = "gemini-api-key"
+      value = var.gemini_api_key
+    }
+  }
 
   ingress {
     external_enabled = true
@@ -187,12 +194,28 @@ resource "azurerm_container_app" "app" {
       }
       env {
         name  = "AI_PROVIDER"
-        value = try(each.value.ai, "demo")
+        value = local.ai_provider[each.key]
       }
       env {
         name  = "DB_POOL_MAX"
         value = "3"
       }
+      dynamic "env" {
+        for_each = contains(local.gemini_apps, each.key) ? [1] : []
+        content {
+          name        = "GEMINI_API_KEY"
+          secret_name = "gemini-api-key"
+        }
+      }
     }
   }
+}
+
+locals {
+  # An app that asks for Gemini runs on demo answers until the key is configured; the app
+  # refuses to start with AI_PROVIDER=gemini and no key.
+  ai_provider = { for name, a in local.apps : name => (
+    try(a.ai, "demo") == "gemini" && var.gemini_api_key == "" ? "demo" : try(a.ai, "demo")
+  ) }
+  gemini_apps = toset([for name, p in local.ai_provider : name if p == "gemini"])
 }

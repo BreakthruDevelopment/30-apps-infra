@@ -118,6 +118,7 @@ jobs:
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       TF_VAR_subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       TF_VAR_location: ${{ vars.AZURE_LOCATION }}
+      TF_VAR_gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
     defaults:
       run:
         working-directory: stacks/azure
@@ -149,6 +150,7 @@ jobs:
       TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
       TF_VAR_project_number: ${{ vars.GCP_PROJECT_NUMBER }}
       TF_VAR_region: ${{ vars.GCP_REGION }}
+      TF_VAR_gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
     defaults:
       run:
         working-directory: stacks/gcp
