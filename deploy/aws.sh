@@ -16,6 +16,9 @@ WORKDIR="$HOME/30-apps-infra"
 BIN="$HOME/.local/bin"
 mkdir -p "$BIN"
 export PATH="$BIN:$PATH" AWS_REGION="$REGION" AWS_DEFAULT_REGION="$REGION"
+# CloudShell's home folder is capped at 1 GB and the AWS provider plugin is larger, so
+# Terraform's working files live in /tmp (rebuilt automatically on the next run).
+export TF_DATA_DIR="/tmp/30apps-terraform"
 
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 BUCKET="breakthru-30apps-tfstate-${ACCOUNT}"
@@ -51,6 +54,7 @@ else
   git clone -q --depth 1 "$REPO_URL" "$WORKDIR"
 fi
 cd "$WORKDIR/stacks/aws"
+rm -rf .terraform  # left over from older runs that used the home folder
 
 terraform init -input=false -reconfigure \
   -backend-config="bucket=${BUCKET}" \
