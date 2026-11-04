@@ -66,14 +66,6 @@ jobs:
           client-id: ${{ vars.AZURE_PLAN_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      - name: Regions where this subscription can create Postgres Flexible Server (B1ms)
-        continue-on-error: true
-        run: |
-          for loc in eastus eastus2 centralus northcentralus southcentralus westus westus2 westus3 canadacentral; do
-            n=$(az postgres flexible-server list-skus --location "$loc" \
-              --query "length([0].supportedServerEditions[?name=='Burstable'].supportedServerSkus[] | [?name=='Standard_B1ms'])" -o tsv 2>/dev/null || echo err)
-            echo "$loc: ${n:-0}"
-          done
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "^1.12.0"
