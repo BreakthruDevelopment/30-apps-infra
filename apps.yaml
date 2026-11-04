@@ -10,6 +10,6 @@ apps:
   - name: template
     clouds: [aws, azure, gcp, oci]
     image: ghcr.io/breakthrudevelopment/30-apps-template
-    tag: sha-01cd5b3
+    tag: sha-99a8f86
     domain: null
-    ai: demo
+    ai: gemini
