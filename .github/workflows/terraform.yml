@@ -46,6 +46,8 @@ jobs:
   plan-azure:
     name: Plan azure
     if: github.event_name == 'pull_request'
+    # Read-only identities can't create the state file, so plans only work after the first apply.
+    continue-on-error: true
     needs: validate
     runs-on: ubuntu-24.04
     env:
@@ -75,6 +77,8 @@ jobs:
   plan-gcp:
     name: Plan gcp
     if: github.event_name == 'pull_request'
+    # Read-only identities can't create the state file, so plans only work after the first apply.
+    continue-on-error: true
     needs: validate
     runs-on: ubuntu-24.04
     env:
