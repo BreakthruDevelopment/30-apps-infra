@@ -68,15 +68,32 @@ skipped with a warning that names it (never the value), so the deploy still goes
 | Cloud | Where the value lives | How to set it |
 | --- | --- | --- |
 | AWS | Parameter Store SecureString `/30apps/<name>/<VAR>`, read by `deploy/aws.sh` | In CloudShell, once per secret (the value is typed silently, so it doesn't show on screen or in history): |
-| Azure, Google Cloud | Environment secret `<APPNAME>_<VAR>` in the `production` environment, read by the Apply job | **Settings → Environments → production → Add environment secret**. `APPNAME` is the app name upper-cased with `-` as `_`, e.g. `BUILD_TRACKER_INGEST_TOKEN` |
+| Azure, Google Cloud | Not wired yet (no app needs it). The stacks already accept them; see below | — |
 | Oracle | Not supported yet | The VM's agent doesn't read per-app secrets, so Oracle apps run without them |
 
 ```
 read -rsp "Value: " V && echo && aws ssm put-parameter --region us-east-2 --name /30apps/<name>/<VAR> --type SecureString --overwrite --value "$V" --query Version --output text; unset V
 ```
 
-Changing a value takes effect on the next deploy (merge to `main` for Azure and Google Cloud, rerun `deploy/aws.sh`
-for AWS). Pull-request plans don't have the values, so a plan after secrets exist may show them as changing.
+**Azure and Google Cloud, when an app first needs it.** Add the value as an environment secret named
+`<APPNAME>_<VAR>` (app name upper-cased, `-` as `_`, e.g. `BUILD_TRACKER_INGEST_TOKEN`) under **Settings →
+Environments → production**, then map that one secret explicitly in the cloud's Apply job and pass it to Terraform:
+
+```yaml
+      - name: Per-app secrets
+        env:
+          BUILD_TRACKER_INGEST_TOKEN: ${{ secrets.BUILD_TRACKER_INGEST_TOKEN }}
+        run: |
+          umask 077
+          jq -n '{app_secrets: {"build-tracker": {INGEST_TOKEN: env.BUILD_TRACKER_INGEST_TOKEN}}}' > "$RUNNER_TEMP/app-secrets.tfvars.json"
+      # then: terraform apply ... -var-file="$RUNNER_TEMP/app-secrets.tfvars.json", and rm the file in an always() step
+```
+
+Each secret is named one by one on purpose: handing the whole `secrets` context to a script would expose every
+production secret (and GitHub flags such workflows as possibly malicious).
+
+Changing a value takes effect on the next deploy (rerun `deploy/aws.sh` for AWS; merge to `main` for Azure and
+Google Cloud once wired). Pull-request plans don't have the values, so a plan after secrets exist may show them as changing.
 Terraform state holds the values like it holds the database password, in each cloud's private state bucket.
 
 **Default URLs** until an app gets a custom domain: Azure `https://app-<name>.<env>.eastus.azurecontainerapps.io`,

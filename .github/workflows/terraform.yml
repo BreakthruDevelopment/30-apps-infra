@@ -128,15 +128,6 @@ jobs:
         with:
           terraform_version: "^1.12.0"
           terraform_wrapper: false
-      - name: Collect per-app secrets
-        # GitHub can't list secrets by pattern, so the whole (masked) secrets context goes in
-        # through the environment; the script writes only the ones apps.yaml asks for to a
-        # private file that is deleted at the end. Nothing is printed.
-        env:
-          SECRETS_JSON: ${{ toJSON(secrets) }}
-        run: |
-          bash ../../deploy/gh-app-secrets.sh azure "$RUNNER_TEMP/app-secrets.tfvars.json"
-          echo "APP_SECRETS_FILE=$RUNNER_TEMP/app-secrets.tfvars.json" >> "$GITHUB_ENV"
       - run: >-
           terraform init
           -backend-config="resource_group_name=${{ vars.AZURE_STATE_RG }}"
@@ -145,12 +136,9 @@ jobs:
           -backend-config="key=azure.tfstate"
           -backend-config="use_oidc=true"
           -backend-config="use_azuread_auth=true"
-      - run: terraform apply -auto-approve -no-color -var-file="$APP_SECRETS_FILE"
+      - run: terraform apply -auto-approve -no-color
       - name: Health check
         run: bash ../../deploy/health.sh "$(terraform output -json urls)"
-      - name: Remove the per-app secrets file
-        if: always()
-        run: rm -f "$RUNNER_TEMP/app-secrets.tfvars.json"
 
   apply-gcp:
     name: Apply gcp
@@ -178,15 +166,6 @@ jobs:
         with:
           terraform_version: "^1.12.0"
           terraform_wrapper: false
-      - name: Collect per-app secrets
-        # GitHub can't list secrets by pattern, so the whole (masked) secrets context goes in
-        # through the environment; the script writes only the ones apps.yaml asks for to a
-        # private file that is deleted at the end. Nothing is printed.
-        env:
-          SECRETS_JSON: ${{ toJSON(secrets) }}
-        run: |
-          bash ../../deploy/gh-app-secrets.sh gcp "$RUNNER_TEMP/app-secrets.tfvars.json"
-          echo "APP_SECRETS_FILE=$RUNNER_TEMP/app-secrets.tfvars.json" >> "$GITHUB_ENV"
       - run: terraform init -backend-config="bucket=${{ vars.GCP_STATE_BUCKET }}" -backend-config="prefix=gcp"
       - name: Create the image registry
         run: terraform apply -auto-approve -no-color -target=google_artifact_registry_repository.apps
@@ -207,12 +186,9 @@ jobs:
             echo "copy $image:$tag -> $REPO/$name:$tag"
             crane copy --platform linux/amd64 "$image:$tag" "$REPO/$name:$tag"
           done
-      - run: terraform apply -auto-approve -no-color -var-file="$APP_SECRETS_FILE"
+      - run: terraform apply -auto-approve -no-color
       - name: Health check
         run: bash ../../deploy/health.sh "$(terraform output -json urls)"
-      - name: Remove the per-app secrets file
-        if: always()
-        run: rm -f "$RUNNER_TEMP/app-secrets.tfvars.json"
 
   apply-oci:
     name: Apply oci
