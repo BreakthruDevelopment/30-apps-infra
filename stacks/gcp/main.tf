@@ -254,6 +254,13 @@ resource "google_cloud_run_v2_service" "app" {
         value = "3"
       }
       dynamic "env" {
+        for_each = toset(local.app_secret_names[each.key])
+        content {
+          name  = env.value
+          value = var.app_secrets[each.key][env.value]
+        }
+      }
+      dynamic "env" {
         for_each = contains(local.gemini_apps, each.key) ? [1] : []
         content {
           name  = "GEMINI_API_KEY"
@@ -279,4 +286,11 @@ locals {
     try(a.ai, "demo") == "gemini" && var.gemini_api_key == "" ? "demo" : try(a.ai, "demo")
   ) }
   gemini_apps = toset([for name, p in local.ai_provider : name if p == "gemini"])
+}
+
+locals {
+  # Names (never values) of the secrets each app declared in apps.yaml and that were supplied.
+  app_secret_names = { for name, a in local.apps : name => [
+    for v in try(a.secrets, []) : v if contains(nonsensitive(keys(try(var.app_secrets[name], {}))), v)
+  ] }
 }

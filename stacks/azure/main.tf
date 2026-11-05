@@ -137,6 +137,14 @@ resource "azurerm_container_app" "app" {
     value = random_password.auth[each.key].result
   }
   dynamic "secret" {
+    for_each = toset(local.app_secret_names[each.key])
+    content {
+      # Container App secret names allow only lowercase letters, digits and hyphens.
+      name  = "sec-${lower(replace(secret.value, "_", "-"))}"
+      value = var.app_secrets[each.key][secret.value]
+    }
+  }
+  dynamic "secret" {
     for_each = contains(local.gemini_apps, each.key) ? [1] : []
     content {
       name  = "gemini-api-key"
@@ -201,6 +209,13 @@ resource "azurerm_container_app" "app" {
         value = "3"
       }
       dynamic "env" {
+        for_each = toset(local.app_secret_names[each.key])
+        content {
+          name        = env.value
+          secret_name = "sec-${lower(replace(env.value, "_", "-"))}"
+        }
+      }
+      dynamic "env" {
         for_each = contains(local.gemini_apps, each.key) ? [1] : []
         content {
           name        = "GEMINI_API_KEY"
@@ -218,4 +233,11 @@ locals {
     try(a.ai, "demo") == "gemini" && var.gemini_api_key == "" ? "demo" : try(a.ai, "demo")
   ) }
   gemini_apps = toset([for name, p in local.ai_provider : name if p == "gemini"])
+}
+
+locals {
+  # Names (never values) of the secrets each app declared in apps.yaml and that were supplied.
+  app_secret_names = { for name, a in local.apps : name => [
+    for v in try(a.secrets, []) : v if contains(nonsensitive(keys(try(var.app_secrets[name], {}))), v)
+  ] }
 }

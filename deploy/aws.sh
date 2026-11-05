@@ -71,6 +71,49 @@ terraform init -input=false -reconfigure \
   -backend-config="use_lockfile=true" >/dev/null
 echo "==> Terraform initialized"
 
+# Per-app secrets. apps.yaml lists the env var NAMES an app needs (`secrets: [INGEST_TOKEN]`); the values
+# live in Parameter Store as SecureStrings, stored once by Michael with:
+#   read -rsp "Value: " V && echo && aws ssm put-parameter --region us-east-2 --name /30apps/<app>/<VAR> \
+#     --type SecureString --overwrite --value "$V" --query Version --output text; unset V
+# This reads them (10 per call), and exports the JSON map {"<app>": {"<VAR>": "<value>"}} as
+# TF_VAR_app_secrets. A parameter that isn't there is skipped with a warning naming it. Values are never
+# printed: they only pass through files in a private temp folder (removed on exit) and the environment.
+collect_app_secrets() {
+  local wanted names tmp n=0 found missing
+  wanted="$(terraform console <<'EOF2'
+jsonencode(flatten([for n, a in local.apps : [for v in try(a.secrets, []) : "/30apps/${n}/${v}"]]))
+EOF2
+)"
+  names="$(jq -r 'fromjson | .[]' <<<"$wanted")"
+  export TF_VAR_app_secrets="{}"
+  if [ -z "$names" ]; then return 0; fi
+  tmp="$(umask 077 && mktemp -d)"
+  # shellcheck disable=SC2064  # expand $tmp now: it is local to this function
+  trap "rm -rf '$tmp'" EXIT
+  while [ -n "$names" ]; do
+    n=$((n + 1))
+    # shellcheck disable=SC2046  # the names are plain /30apps/<app>/<VAR> words
+    if ! aws ssm get-parameters --with-decryption --output json </dev/null \
+      --names $(head -n 10 <<<"$names") >"$tmp/batch-$n.json"; then
+      echo "==> WARNING: could not read a batch of app secrets from Parameter Store; skipping it"
+      rm -f "$tmp/batch-$n.json"
+    fi
+    names="$(tail -n +11 <<<"$names")"
+  done
+  if ! ls "$tmp"/batch-*.json >/dev/null 2>&1; then echo '{"Parameters":[]}' >"$tmp/batch-0.json"; fi
+  TF_VAR_app_secrets="$(jq -s -c 'reduce (.[].Parameters[]) as $p ({};
+    ($p.Name | ltrimstr("/30apps/") | split("/")) as [$a, $v] | .[$a][$v] = $p.Value)' "$tmp"/batch-*.json)"
+  export TF_VAR_app_secrets
+  found="$(jq -r 'to_entries[] | .key as $a | .value | keys[] | "/30apps/\($a)/\(.)"' <<<"$TF_VAR_app_secrets")"
+  missing="$(jq -r 'fromjson | .[]' <<<"$wanted" | grep -vxF -f <(printf '%s\n' "$found") || true)"
+  if [ -n "$missing" ]; then
+    while read -r m; do echo "==> WARNING: no app secret at ${m}; skipping it"; done <<<"$missing"
+  fi
+  echo "==> App secrets: $(jq '[.[] | length] | add // 0' <<<"$TF_VAR_app_secrets") value(s) found"
+}
+
+collect_app_secrets
+
 echo "==> Creating image repositories and the database (a new database takes ~10 minutes)"
 terraform apply -input=false -auto-approve \
   -target=aws_ecr_repository.app -target=aws_ecr_lifecycle_policy.app -target=aws_db_instance.main
