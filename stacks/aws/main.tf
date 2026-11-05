@@ -152,11 +152,53 @@ resource "random_password" "auth" {
 }
 
 locals {
+  # Apps that asked for a custom domain, and the subset whose certificate is already ISSUED
+  # (deploy/aws.sh asks ACM and passes the list in, so this is known at plan time). Only those
+  # get a domain mapping, and only those switch APP_URL to the custom domain: until DNS and the
+  # certificate are in place, cookies and sign-in keep working on the execute-api URL.
+  domain_apps = { for name, a in local.apps : name => a.domain if try(a.domain, null) != null }
+  mapped_apps = { for name, d in local.domain_apps : name => d if contains(var.issued_domains, d) }
+
   app_url = {
     for name, a in local.apps : name => (
-      try(a.domain, null) != null ? "https://${a.domain}" : aws_apigatewayv2_api.app[name].api_endpoint
+      contains(keys(local.mapped_apps), name) ? "https://${local.mapped_apps[name]}" : aws_apigatewayv2_api.app[name].api_endpoint
     )
   }
+}
+
+# --- Custom domains ----------------------------------------------------------------------
+# DNS stays at Network Solutions and is edited by hand; nothing here touches DNS. Phase 1
+# creates the certificate and outputs its validation CNAME (`dns_records`). Phase 2, once ACM
+# shows the certificate Issued and deploy/aws.sh is rerun, creates the API Gateway custom
+# domain and mapping. aws_acm_certificate_validation is deliberately not used: it would block
+# the apply for up to 75 minutes waiting for a record that is added by hand.
+
+resource "aws_acm_certificate" "app" {
+  for_each          = local.domain_apps
+  domain_name       = each.value
+  validation_method = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_apigatewayv2_domain_name" "app" {
+  for_each    = local.mapped_apps
+  domain_name = each.value
+
+  domain_name_configuration {
+    certificate_arn = aws_acm_certificate.app[each.key].arn
+    endpoint_type   = "REGIONAL"
+    security_policy = "TLS_1_2"
+  }
+}
+
+resource "aws_apigatewayv2_api_mapping" "app" {
+  for_each    = local.mapped_apps
+  api_id      = aws_apigatewayv2_api.app[each.key].id
+  domain_name = aws_apigatewayv2_domain_name.app[each.key].id
+  stage       = aws_apigatewayv2_stage.app[each.key].id
 }
 
 resource "aws_cloudwatch_log_group" "app" {

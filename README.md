@@ -96,6 +96,35 @@ Changing a value takes effect on the next deploy (rerun `deploy/aws.sh` for AWS;
 Google Cloud once wired). Pull-request plans don't have the values, so a plan after secrets exist may show them as changing.
 Terraform state holds the values like it holds the database password, in each cloud's private state bucket.
 
+## Custom domains on AWS
+
+DNS for `breakthruventures.ai` stays at Network Solutions and is edited by hand; Terraform never touches DNS.
+An app with a `domain` in `apps.yaml` gets an ACM certificate (DNS validation, us-east-2, free) on every
+deploy. The API Gateway custom domain, its mapping and the switch of `APP_URL` to `https://<domain>` happen only
+once ACM reports that certificate **Issued**: `deploy/aws.sh` asks ACM before applying and passes the issued names
+to Terraform (`TF_VAR_issued_domains`). Until then the app keeps working on its `execute-api` URL, so sign-in
+cookies never break. The `urls` output stays the `execute-api` URLs (the health check uses them); `custom_urls`
+lists the custom ones that exist.
+
+Steps (example: app 1, `app1.breakthruventures.ai`):
+
+1. Run `deploy/aws.sh` in CloudShell. At the end it prints **DNS records to add at Network Solutions**: a
+   `PENDING` validation CNAME (host like `_3f2a....app1`, value like `_9b1c....acm-validations.aws`).
+2. At Network Solutions: My Domains, `breakthruventures.ai`, Manage Advanced DNS Records, Add, type **CNAME**,
+   host exactly as printed (it is relative to the domain, so don't append `breakthruventures.ai`), value as printed
+   (no trailing dot needed), default TTL. Save.
+3. Wait for the certificate to be issued (usually 5 to 30 minutes after the record is visible):
+   `aws acm list-certificates --region us-east-2 --query "CertificateSummaryList[].[DomainName,Status]" --output text`
+   shows `app1.breakthruventures.ai  ISSUED`.
+4. Rerun `deploy/aws.sh`. It creates the custom domain and mapping, updates the app's `APP_URL`, and now prints a
+   `FINAL` record: CNAME, host `app1`, value `<id>.execute-api.us-east-2.amazonaws.com` (the domain's target).
+5. Add that CNAME at Network Solutions the same way, wait for DNS (`dig +short app1.breakthruventures.ai`), then check
+   `https://app1.breakthruventures.ai/api/health`.
+
+Leave the validation record in place; ACM uses it to renew the certificate. The records are not secrets.
+Anything that was configured with the old `execute-api` URL (for example a GitHub webhook or the tracker's
+`TRACKER_URL`) keeps working, because that URL stays valid.
+
 **Default URLs** until an app gets a custom domain: Azure `https://app-<name>.<env>.eastus.azurecontainerapps.io`,
 Google Cloud `https://<name>-<project-number>.us-central1.run.app`, Oracle `https://<name>.<ip-with-dashes>.sslip.io`,
 AWS `https://<id>.execute-api.us-east-2.amazonaws.com`. Each deploy prints them.

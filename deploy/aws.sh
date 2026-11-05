@@ -48,6 +48,14 @@ if ! command -v terraform >/dev/null 2>&1; then
   rm -f /tmp/terraform.zip
 fi
 
+# mikefarah yq under its own path: a different tool called "yq" (a Python jq wrapper) may already be installed.
+YQ="$BIN/yq-go"
+if [ ! -x "$YQ" ]; then
+  echo "==> Installing yq (reads apps.yaml)"
+  curl -fsSL -o "$YQ" "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${TF_ARCH}"
+  chmod +x "$YQ"
+fi
+
 if ! command -v crane >/dev/null 2>&1; then
   echo "==> Installing crane (copies container images between registries)"
   curl -fsSL "https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_${CRANE_ARCH}.tar.gz" \
@@ -79,12 +87,8 @@ echo "==> Terraform initialized"
 # TF_VAR_app_secrets. A parameter that isn't there is skipped with a warning naming it. Values are never
 # printed: they only pass through files in a private temp folder (removed on exit) and the environment.
 collect_app_secrets() {
-  local wanted names tmp n=0 found missing
-  wanted="$(terraform console <<'EOF2'
-jsonencode(flatten([for n, a in local.apps : [for v in try(a.secrets, []) : "/30apps/${n}/${v}"]]))
-EOF2
-)"
-  names="$(jq -r 'fromjson | .[]' <<<"$wanted")"
+  local names tmp n=0 found missing
+  names="$(jq -r '.[] | .name as $n | (.secrets // [])[] | "/30apps/\($n)/\(.)"' <<<"$AWS_APPS")"
   export TF_VAR_app_secrets="{}"
   if [ -z "$names" ]; then return 0; fi
   tmp="$(umask 077 && mktemp -d)"
@@ -105,14 +109,52 @@ EOF2
     ($p.Name | ltrimstr("/30apps/") | split("/")) as [$a, $v] | .[$a][$v] = $p.Value)' "$tmp"/batch-*.json)"
   export TF_VAR_app_secrets
   found="$(jq -r 'to_entries[] | .key as $a | .value | keys[] | "/30apps/\($a)/\(.)"' <<<"$TF_VAR_app_secrets")"
-  missing="$(jq -r 'fromjson | .[]' <<<"$wanted" | grep -vxF -f <(printf '%s\n' "$found") || true)"
+  missing="$(jq -r '.[] | .name as $n | (.secrets // [])[] | "/30apps/\($n)/\(.)"' <<<"$AWS_APPS" | grep -vxF -f <(printf '%s\n' "$found") || true)"
   if [ -n "$missing" ]; then
     while read -r m; do echo "==> WARNING: no app secret at ${m}; skipping it"; done <<<"$missing"
   fi
   echo "==> App secrets: $(jq '[.[] | length] | add // 0' <<<"$TF_VAR_app_secrets") value(s) found"
 }
 
+# The AWS apps, read straight from apps.yaml. (Asking Terraform instead fails the first time a new app
+# appears, because its locals refer to resources that don't exist yet.)
+AWS_APPS="$("$YQ" -o=json '[.apps[] | select(.clouds | contains(["aws"]))]' ../../apps.yaml)"
+
 collect_app_secrets
+
+# Custom domains. Terraform creates each app's certificate, but the API Gateway domain mapping only
+# once ACM reports the certificate ISSUED (which happens after the validation CNAME is added by hand
+# at Network Solutions). So ask ACM now and hand Terraform the issued names: a JSON list of strings.
+issued_domains() {
+  aws acm list-certificates --certificate-statuses ISSUED --region "$REGION" --output json \
+    | jq -c '[.CertificateSummaryList[]?.DomainName]'
+}
+
+# Prints the records to add at Network Solutions, from `terraform output -json dns_records`.
+# Pending = certificate validation (add first). Final = the app's own name -> API Gateway target
+# (printed once the certificate is issued and this script has been rerun). Values are not secrets.
+print_dns_records() {
+  local records="$1"
+  if [ "$(jq 'length' <<<"$records")" = "0" ]; then return 0; fi
+  echo
+  echo "==> DNS records to add at Network Solutions (Manage Advanced DNS Records -> Add -> CNAME)"
+  jq -r '
+    to_entries[] | .key as $app | .value as $r |
+    "    \($app)  (\($r.domain))",
+    (if $r.final != null then
+       "      FINAL    host: \($r.final.host)  type: \($r.final.type)  value: \($r.final.value)",
+       "      (validation record \($r.validation.host) can stay; it keeps the certificate renewing)"
+     else
+       "      PENDING  host: \($r.validation.host)  type: \($r.validation.type)  value: \($r.validation.value)",
+       "               (full name: \($r.validation.name); this proves ownership to AWS. Add it, wait for the",
+       "                certificate to show Issued, rerun this script, then add the app record it prints.)"
+     end)
+  ' <<<"$records"
+}
+
+TF_VAR_issued_domains="$(issued_domains)"
+export TF_VAR_issued_domains
+echo "==> Issued certificates: $(jq -r 'join(", ") | if . == "" then "none" else . end' <<<"$TF_VAR_issued_domains")"
 
 echo "==> Creating image repositories and the database (a new database takes ~10 minutes)"
 terraform apply -input=false -auto-approve \
@@ -120,11 +162,7 @@ terraform apply -input=false -auto-approve \
 
 echo "==> Copying app images into ECR (ARM builds, which Lambda runs on)"
 aws ecr get-login-password | crane auth login --username AWS --password-stdin "$REGISTRY" >/dev/null
-MIRRORS="$(terraform console <<'EOF'
-jsonencode({ for n, a in local.apps : "${a.image}:${a.tag}" => "30apps/${n}:${a.tag}" })
-EOF
-)"
-echo "$MIRRORS" | jq -r '. | fromjson | to_entries[] | "\(.key) \(.value)"' | while read -r src dst; do
+jq -r '.[] | "\(.image):\(.tag) 30apps/\(.name):\(.tag)"' <<<"$AWS_APPS" | while read -r src dst; do
   echo "    ${src} -> ${REGISTRY}/${dst}"
   crane copy --platform linux/arm64 "$src" "${REGISTRY}/${dst}"
 done
@@ -137,4 +175,5 @@ terraform output -json urls | jq -r 'to_entries[] | "\(.key) \(.value)"' | while
   status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "${url}/api/health" || true)"
   echo "    ${name}: ${url}  (health: HTTP ${status})"
 done
+print_dns_records "$(terraform output -json dns_records)"
 echo "==> Done. A 503 right after the first deploy usually means the app is still migrating; check again in a minute."
