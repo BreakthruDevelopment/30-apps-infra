@@ -17,3 +17,15 @@ variable "app_secrets" {
   default     = {}
   sensitive   = true
 }
+
+variable "issued_domains" {
+  description = "Custom domains whose ACM certificate is ISSUED. deploy/aws.sh fills this from `aws acm list-certificates`; a domain here gets its API Gateway domain mapping and APP_URL."
+  type        = list(string)
+  default     = []
+}
+
+variable "dns_zone" {
+  description = "The DNS zone kept at Network Solutions; used only to print host names relative to it."
+  type        = string
+  default     = "breakthruventures.ai"
+}

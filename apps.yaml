@@ -20,6 +20,6 @@ apps:
     clouds: [aws]
     image: ghcr.io/breakthrudevelopment/01-build-tracker
     tag: sha-96b646c
-    domain: null
+    domain: app1.breakthruventures.ai
     ai: gemini
     secrets: [GITHUB_WEBHOOK_SECRET, INGEST_TOKEN, SYNC_TOKEN]

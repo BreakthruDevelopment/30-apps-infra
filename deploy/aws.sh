@@ -122,6 +122,40 @@ AWS_APPS="$("$YQ" -o=json '[.apps[] | select(.clouds | contains(["aws"]))]' ../.
 
 collect_app_secrets
 
+# Custom domains. Terraform creates each app's certificate, but the API Gateway domain mapping only
+# once ACM reports the certificate ISSUED (which happens after the validation CNAME is added by hand
+# at Network Solutions). So ask ACM now and hand Terraform the issued names: a JSON list of strings.
+issued_domains() {
+  aws acm list-certificates --certificate-statuses ISSUED --region "$REGION" --output json \
+    | jq -c '[.CertificateSummaryList[]?.DomainName]'
+}
+
+# Prints the records to add at Network Solutions, from `terraform output -json dns_records`.
+# Pending = certificate validation (add first). Final = the app's own name -> API Gateway target
+# (printed once the certificate is issued and this script has been rerun). Values are not secrets.
+print_dns_records() {
+  local records="$1"
+  if [ "$(jq 'length' <<<"$records")" = "0" ]; then return 0; fi
+  echo
+  echo "==> DNS records to add at Network Solutions (Manage Advanced DNS Records -> Add -> CNAME)"
+  jq -r '
+    to_entries[] | .key as $app | .value as $r |
+    "    \($app)  (\($r.domain))",
+    (if $r.final != null then
+       "      FINAL    host: \($r.final.host)  type: \($r.final.type)  value: \($r.final.value)",
+       "      (validation record \($r.validation.host) can stay; it keeps the certificate renewing)"
+     else
+       "      PENDING  host: \($r.validation.host)  type: \($r.validation.type)  value: \($r.validation.value)",
+       "               (full name: \($r.validation.name); this proves ownership to AWS. Add it, wait for the",
+       "                certificate to show Issued, rerun this script, then add the app record it prints.)"
+     end)
+  ' <<<"$records"
+}
+
+TF_VAR_issued_domains="$(issued_domains)"
+export TF_VAR_issued_domains
+echo "==> Issued certificates: $(jq -r 'join(", ") | if . == "" then "none" else . end' <<<"$TF_VAR_issued_domains")"
+
 echo "==> Creating image repositories and the database (a new database takes ~10 minutes)"
 terraform apply -input=false -auto-approve \
   -target=aws_ecr_repository.app -target=aws_ecr_lifecycle_policy.app -target=aws_db_instance.main
@@ -141,4 +175,5 @@ terraform output -json urls | jq -r 'to_entries[] | "\(.key) \(.value)"' | while
   status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "${url}/api/health" || true)"
   echo "    ${name}: ${url}  (health: HTTP ${status})"
 done
+print_dns_records "$(terraform output -json dns_records)"
 echo "==> Done. A 503 right after the first deploy usually means the app is still migrating; check again in a minute."
