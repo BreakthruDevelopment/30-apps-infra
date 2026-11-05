@@ -6,6 +6,7 @@
 #   tag     an immutable sha-<commit> tag (never "latest", so deploys are repeatable)
 #   domain  custom domain once its DNS record exists at Network Solutions; null = cloud default URL
 #   ai      "demo" (recorded answers) or "gemini"
+#   secrets optional list of secret env var NAMES (never values); see README "Per-app secrets"
 apps:
   - name: template
     clouds: [aws, azure, gcp, oci]

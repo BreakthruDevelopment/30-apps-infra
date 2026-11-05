@@ -10,3 +10,10 @@ variable "gemini_api_key" {
   default     = ""
   sensitive   = true
 }
+
+variable "app_secrets" {
+  description = "Per-app secret environment variables: app name => env var name => value. Only names listed in that app's `secrets:` in apps.yaml are applied; extras and missing values are ignored."
+  type        = map(map(string))
+  default     = {}
+  sensitive   = true
+}

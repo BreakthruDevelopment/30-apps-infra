@@ -51,6 +51,34 @@ environment (Azure, Google Cloud) or from AWS Parameter Store (`/30apps/gemini_a
 Without a key they serve demo answers. The Oracle VM reads it from `/opt/30apps/env/shared.env`, which isn't
 set up yet, so Oracle apps run on demo answers for now.
 
+## Per-app secrets
+
+An app that needs its own secrets (webhook secrets, ingest tokens) lists the **names** in `apps.yaml`; the
+values never go in the repo:
+
+```yaml
+  - name: build-tracker
+    secrets: [GITHUB_WEBHOOK_SECRET, INGEST_TOKEN, SYNC_TOKEN]
+```
+
+Each name becomes an environment variable of that name in the running app. A secret that has no value yet is
+skipped with a warning that names it (never the value), so the deploy still goes through. Apps without
+`secrets:` are unaffected. Generate each value with `openssl rand -hex 32` (64 characters; use at least 16).
+
+| Cloud | Where the value lives | How to set it |
+| --- | --- | --- |
+| AWS | Parameter Store SecureString `/30apps/<name>/<VAR>`, read by `deploy/aws.sh` | In CloudShell, once per secret (the value is typed silently, so it doesn't show on screen or in history): |
+| Azure, Google Cloud | Environment secret `<APPNAME>_<VAR>` in the `production` environment, read by the Apply job | **Settings → Environments → production → Add environment secret**. `APPNAME` is the app name upper-cased with `-` as `_`, e.g. `BUILD_TRACKER_INGEST_TOKEN` |
+| Oracle | Not supported yet | The VM's agent doesn't read per-app secrets, so Oracle apps run without them |
+
+```
+read -rsp "Value: " V && echo && aws ssm put-parameter --region us-east-2 --name /30apps/<name>/<VAR> --type SecureString --overwrite --value "$V" --query Version --output text; unset V
+```
+
+Changing a value takes effect on the next deploy (merge to `main` for Azure and Google Cloud, rerun `deploy/aws.sh`
+for AWS). Pull-request plans don't have the values, so a plan after secrets exist may show them as changing.
+Terraform state holds the values like it holds the database password, in each cloud's private state bucket.
+
 **Default URLs** until an app gets a custom domain: Azure `https://app-<name>.<env>.eastus.azurecontainerapps.io`,
 Google Cloud `https://<name>-<project-number>.us-central1.run.app`, Oracle `https://<name>.<ip-with-dashes>.sslip.io`,
 AWS `https://<id>.execute-api.us-east-2.amazonaws.com`. Each deploy prints them.

@@ -176,7 +176,7 @@ resource "aws_lambda_function" "app" {
   timeout       = 29
 
   environment {
-    variables = merge(contains(local.gemini_apps, each.key) ? { GEMINI_API_KEY = var.gemini_api_key } : {}, {
+    variables = merge(contains(local.gemini_apps, each.key) ? { GEMINI_API_KEY = var.gemini_api_key } : {}, local.app_secret_env[each.key], {
       DATABASE_URL = format("postgres://pgadmin:%s@%s:5432/%s?sslmode=require",
       random_password.pg.result, aws_db_instance.main.address, postgresql_database.app[each.key].name)
       BETTER_AUTH_SECRET = random_password.auth[each.key].result
@@ -240,4 +240,12 @@ locals {
     try(a.ai, "demo") == "gemini" && var.gemini_api_key == "" ? "demo" : try(a.ai, "demo")
   ) }
   gemini_apps = toset([for name, p in local.ai_provider : name if p == "gemini"])
+}
+
+locals {
+  # Names (never values) of the secrets each app declared in apps.yaml and that were supplied.
+  app_secret_names = { for name, a in local.apps : name => [
+    for v in try(a.secrets, []) : v if contains(nonsensitive(keys(try(var.app_secrets[name], {}))), v)
+  ] }
+  app_secret_env = { for name, vars in local.app_secret_names : name => { for v in vars : v => var.app_secrets[name][v] } }
 }
