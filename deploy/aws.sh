@@ -101,6 +101,14 @@ terraform init -input=false -reconfigure \
   -backend-config="use_lockfile=true" >/dev/null
 echo "==> Terraform initialized"
 
+# Once Terraform has created DNS records in Cloudflare, a run without the token would plan to delete them
+# (and fail half-way). Stop before that happens.
+if [ "$TF_VAR_manage_dns" = false ] && terraform state list 2>/dev/null | grep -q '^cloudflare_dns_record\.'; then
+  echo "==> ERROR: Terraform manages DNS records in Cloudflare, but no token was found at"
+  echo "    /30apps/cloudflare/api_token. Restore the token and rerun; nothing was changed."
+  exit 1
+fi
+
 # Per-app secrets. apps.yaml lists the env var NAMES an app needs (`secrets: [INGEST_TOKEN]`); the values
 # live in Parameter Store as SecureStrings, stored once by Michael with:
 #   read -rsp "Value: " V && echo && aws ssm put-parameter --region us-east-2 --name /30apps/<app>/<VAR> \
