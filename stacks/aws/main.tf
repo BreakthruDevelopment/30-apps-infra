@@ -10,6 +10,10 @@ terraform {
       source  = "hashicorp/aws"
       version = ">= 6.0, < 8.0"
     }
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = "~> 5.0"
+    }
     postgresql = {
       source  = "cyrilgdn/postgresql"
       version = "~> 1.25"
@@ -28,6 +32,13 @@ provider "aws" {
   default_tags {
     tags = { project = "30-apps-30-days", managed_by = "terraform" }
   }
+}
+
+# DNS lives in Cloudflare. Only used when var.manage_dns is true (deploy/aws.sh sets it when the
+# token is in Parameter Store). Otherwise no cloudflare resource exists, so the placeholder is never
+# sent anywhere. The real token comes from the CLOUDFLARE_API_TOKEN environment variable.
+provider "cloudflare" {
+  api_token = var.manage_dns ? null : "unused-dns-not-managed"
 }
 
 locals {
@@ -152,26 +163,60 @@ resource "random_password" "auth" {
 }
 
 locals {
-  # Apps that asked for a custom domain, and the subset whose certificate is already ISSUED
-  # (deploy/aws.sh asks ACM and passes the list in, so this is known at plan time). Only those
-  # get a domain mapping, and only those switch APP_URL to the custom domain: until DNS and the
-  # certificate are in place, cookies and sign-in keep working on the execute-api URL.
+  # Apps that asked for a custom domain.
   domain_apps = { for name, a in local.apps : name => a.domain if try(a.domain, null) != null }
-  mapped_apps = { for name, d in local.domain_apps : name => d if contains(var.issued_domains, d) }
+
+  # Apps whose API Gateway custom domain and mapping exist after this apply.
+  #  - manage_dns = true: all of them. Terraform creates the validation records in Cloudflare, waits for
+  #    the certificate, then creates the domain, mapping and CNAME in one pass.
+  #  - manage_dns = false (manual path): only those whose certificate ACM already reports ISSUED
+  #    (deploy/aws.sh asks ACM and passes the list in), because the validation record is added by hand.
+  # Until then APP_URL stays the execute-api URL, so cookies and sign-in keep working.
+  mapped_apps = {
+    for name, d in local.domain_apps : name => d
+    if var.manage_dns || contains(var.issued_domains, d)
+  }
 
   app_url = {
     for name, a in local.apps : name => (
       contains(keys(local.mapped_apps), name) ? "https://${local.mapped_apps[name]}" : aws_apigatewayv2_api.app[name].api_endpoint
     )
   }
+
+  # DNS records Terraform owns: only for apps in apps.yaml with a domain, and only with manage_dns.
+  dns_apps = var.manage_dns ? local.domain_apps : {}
+  zone_id  = var.cloudflare_zone_id != "" ? var.cloudflare_zone_id : try(data.cloudflare_zone.main[0].id, "")
+  validation = {
+    for name in keys(local.dns_apps) : name => tolist(aws_acm_certificate.app[name].domain_validation_options)[0]
+  }
 }
 
 # --- Custom domains ----------------------------------------------------------------------
-# DNS stays at Network Solutions and is edited by hand; nothing here touches DNS. Phase 1
-# creates the certificate and outputs its validation CNAME (`dns_records`). Phase 2, once ACM
-# shows the certificate Issued and deploy/aws.sh is rerun, creates the API Gateway custom
-# domain and mapping. aws_acm_certificate_validation is deliberately not used: it would block
-# the apply for up to 75 minutes waiting for a record that is added by hand.
+# With manage_dns (the normal path) one apply does everything: certificate, its validation CNAME in
+# Cloudflare, a wait for ISSUED, the API Gateway domain and mapping, and the app's own CNAME.
+# Without it (no Cloudflare token) the certificate is created and its validation CNAME is printed
+# for adding by hand; once ACM shows Issued, rerunning deploy/aws.sh creates the domain and mapping.
+
+# Guard: Terraform may only create records under the app subdomains it is given. It never touches
+# the apex, mail, website or other existing names in the zone, and it never manages the zone itself.
+resource "terraform_data" "dns_guard" {
+  for_each = local.dns_apps
+  input    = each.value
+  lifecycle {
+    precondition {
+      condition     = endswith(each.value, ".${var.dns_zone}") && !contains(var.reserved_hosts, trimsuffix(each.value, ".${var.dns_zone}")) && !startswith(each.value, "_")
+      error_message = "App ${each.key}: domain ${each.value} must be a subdomain of ${var.dns_zone} that is not a reserved name (${join(", ", var.reserved_hosts)})."
+    }
+  }
+}
+
+data "cloudflare_zone" "main" {
+  count = var.manage_dns && var.cloudflare_zone_id == "" ? 1 : 0
+  # Needs Zone:Read on the token. With a DNS:Edit-only token set cloudflare_zone_id instead.
+  filter = {
+    name = var.dns_zone
+  }
+}
 
 resource "aws_acm_certificate" "app" {
   for_each          = local.domain_apps
@@ -183,12 +228,38 @@ resource "aws_acm_certificate" "app" {
   }
 }
 
+resource "cloudflare_dns_record" "acm_validation" {
+  for_each = local.dns_apps
+  zone_id  = local.zone_id
+  name     = trimsuffix(local.validation[each.key].resource_record_name, ".")
+  type     = local.validation[each.key].resource_record_type
+  content  = trimsuffix(local.validation[each.key].resource_record_value, ".")
+  ttl      = 1
+  proxied  = false
+  comment  = "30-apps-infra: ACM validation for ${each.key}"
+
+  depends_on = [terraform_data.dns_guard]
+}
+
+resource "aws_acm_certificate_validation" "app" {
+  for_each                = local.dns_apps
+  certificate_arn         = aws_acm_certificate.app[each.key].arn
+  validation_record_fqdns = [trimsuffix(local.validation[each.key].resource_record_name, ".")]
+
+  timeouts {
+    create = "15m"
+  }
+
+  depends_on = [cloudflare_dns_record.acm_validation]
+}
+
 resource "aws_apigatewayv2_domain_name" "app" {
   for_each    = local.mapped_apps
   domain_name = each.value
 
   domain_name_configuration {
-    certificate_arn = aws_acm_certificate.app[each.key].arn
+    # With manage_dns, wait for the validation resource so the certificate is ISSUED first.
+    certificate_arn = var.manage_dns ? aws_acm_certificate_validation.app[each.key].certificate_arn : aws_acm_certificate.app[each.key].arn
     endpoint_type   = "REGIONAL"
     security_policy = "TLS_1_2"
   }
@@ -199,6 +270,19 @@ resource "aws_apigatewayv2_api_mapping" "app" {
   api_id      = aws_apigatewayv2_api.app[each.key].id
   domain_name = aws_apigatewayv2_domain_name.app[each.key].id
   stage       = aws_apigatewayv2_stage.app[each.key].id
+}
+
+resource "cloudflare_dns_record" "app" {
+  for_each = local.dns_apps
+  zone_id  = local.zone_id
+  name     = each.value
+  type     = "CNAME"
+  content  = aws_apigatewayv2_domain_name.app[each.key].domain_name_configuration[0].target_domain_name
+  ttl      = 1
+  proxied  = false
+  comment  = "30-apps-infra: ${each.key} on AWS"
+
+  depends_on = [terraform_data.dns_guard, aws_apigatewayv2_api_mapping.app]
 }
 
 resource "aws_cloudwatch_log_group" "app" {

@@ -161,6 +161,20 @@ resource "random_password" "auth" {
   special  = false
 }
 
+# Custom domains are not wired up on gcp yet. Fail the plan loudly instead of promising a URL
+# (APP_URL) whose DNS and certificate nobody creates. TODO: see README "Custom domains".
+# Cloud Run (needs a domain mapping and Google domain verification).
+resource "terraform_data" "domain_unsupported" {
+  for_each = { for name, a in local.apps : name => a.domain if try(a.domain, null) != null }
+  input    = each.value
+  lifecycle {
+    precondition {
+      condition     = each.value == null
+      error_message = "App ${each.key} sets domain ${each.value}, but custom domains are not supported on gcp yet. Set domain: null for this cloud (see README, Custom domains)."
+    }
+  }
+}
+
 locals {
   app_url = {
     for name, a in local.apps : name => (

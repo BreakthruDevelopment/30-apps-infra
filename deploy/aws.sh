@@ -33,6 +33,28 @@ TF_VAR_gemini_api_key="$(aws ssm get-parameter --name /30apps/gemini_api_key --w
 export TF_VAR_gemini_api_key
 if [ -n "$TF_VAR_gemini_api_key" ]; then echo "==> Gemini key found"; else echo "==> No Gemini key in Parameter Store; AI runs in demo mode"; fi
 
+# Cloudflare DNS. The API token (Zone:DNS:Edit on breakthruventures.ai only) is stored once with:
+#   read -rsp "Token: " V && echo && aws ssm put-parameter --region us-east-2 --name /30apps/cloudflare/api_token \
+#     --type SecureString --overwrite --value "$V" --query Version --output text; unset V
+# With it, Terraform creates each app's DNS records (certificate validation and the app's CNAME) itself.
+# Without it the manual two-phase flow is used. The zone ID (not secret) may be stored as a plain String at
+# /30apps/cloudflare/zone_id; without it Terraform looks the zone up by name, which needs Zone:Read.
+# The token is never printed; it only goes into the environment variable the Cloudflare provider reads.
+CLOUDFLARE_API_TOKEN="$(aws ssm get-parameter --name /30apps/cloudflare/api_token --with-decryption \
+  --query Parameter.Value --output text 2>/dev/null || true)"
+if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+  export CLOUDFLARE_API_TOKEN
+  export TF_VAR_manage_dns=true
+  TF_VAR_cloudflare_zone_id="$(aws ssm get-parameter --name /30apps/cloudflare/zone_id \
+    --query Parameter.Value --output text 2>/dev/null || true)"
+  export TF_VAR_cloudflare_zone_id
+  echo "==> Cloudflare token found; DNS records are created automatically"
+else
+  unset CLOUDFLARE_API_TOKEN
+  export TF_VAR_manage_dns=false
+  echo "==> No Cloudflare token in Parameter Store; DNS records are added by hand (see the README)"
+fi
+
 case "$(uname -m)" in
   x86_64) TF_ARCH=amd64; CRANE_ARCH=x86_64 ;;
   aarch64 | arm64) TF_ARCH=arm64; CRANE_ARCH=arm64 ;;
@@ -79,6 +101,14 @@ terraform init -input=false -reconfigure \
   -backend-config="use_lockfile=true" >/dev/null
 echo "==> Terraform initialized"
 
+# Once Terraform has created DNS records in Cloudflare, a run without the token would plan to delete them
+# (and fail half-way). Stop before that happens.
+if [ "$TF_VAR_manage_dns" = false ] && terraform state list 2>/dev/null | grep -q '^cloudflare_dns_record\.'; then
+  echo "==> ERROR: Terraform manages DNS records in Cloudflare, but no token was found at"
+  echo "    /30apps/cloudflare/api_token. Restore the token and rerun; nothing was changed."
+  exit 1
+fi
+
 # Per-app secrets. apps.yaml lists the env var NAMES an app needs (`secrets: [INGEST_TOKEN]`); the values
 # live in Parameter Store as SecureStrings, stored once by Michael with:
 #   read -rsp "Value: " V && echo && aws ssm put-parameter --region us-east-2 --name /30apps/<app>/<VAR> \
@@ -122,34 +152,47 @@ AWS_APPS="$("$YQ" -o=json '[.apps[] | select(.clouds | contains(["aws"]))]' ../.
 
 collect_app_secrets
 
-# Custom domains. Terraform creates each app's certificate, but the API Gateway domain mapping only
-# once ACM reports the certificate ISSUED (which happens after the validation CNAME is added by hand
-# at Network Solutions). So ask ACM now and hand Terraform the issued names: a JSON list of strings.
+# Custom domains. Terraform creates each app's certificate. With the Cloudflare token it also creates the
+# validation and app records and waits for the certificate (one pass). Without it, the API Gateway domain
+# mapping waits until ACM reports the certificate ISSUED (after the validation CNAME is added by hand),
+# so ask ACM now and hand Terraform the issued names: a JSON list of strings. Unused when DNS is automatic.
 issued_domains() {
   aws acm list-certificates --certificate-statuses ISSUED --region "$REGION" --output json \
     | jq -c '[.CertificateSummaryList[]?.DomainName]'
 }
 
-# Prints the records to add at Network Solutions, from `terraform output -json dns_records`.
-# Pending = certificate validation (add first). Final = the app's own name -> API Gateway target
-# (printed once the certificate is issued and this script has been rerun). Values are not secrets.
+# Prints the DNS records, from `terraform output -json dns_records`. Values are not secrets.
+# Automatic: already created in Cloudflare by this run. Manual: pending = certificate validation (add
+# first); final = the app's own name -> API Gateway target (printed once the certificate is issued and
+# this script has been rerun).
 print_dns_records() {
   local records="$1"
   if [ "$(jq 'length' <<<"$records")" = "0" ]; then return 0; fi
   echo
-  echo "==> DNS records to add at Network Solutions (Manage Advanced DNS Records -> Add -> CNAME)"
-  jq -r '
-    to_entries[] | .key as $app | .value as $r |
-    "    \($app)  (\($r.domain))",
-    (if $r.final != null then
-       "      FINAL    host: \($r.final.host)  type: \($r.final.type)  value: \($r.final.value)",
-       "      (validation record \($r.validation.host) can stay; it keeps the certificate renewing)"
-     else
-       "      PENDING  host: \($r.validation.host)  type: \($r.validation.type)  value: \($r.validation.value)",
-       "               (full name: \($r.validation.name); this proves ownership to AWS. Add it, wait for the",
-       "                certificate to show Issued, rerun this script, then add the app record it prints.)"
-     end)
-  ' <<<"$records"
+  if [ "$(jq 'map(select(.automatic)) | length' <<<"$records")" != "0" ]; then
+    echo "==> DNS records (created automatically in Cloudflare; nothing to add by hand)"
+    jq -r '
+      to_entries[] | select(.value.automatic) | .key as $app | .value as $r |
+      "    \($app)  (\($r.domain))",
+      "      validation  host: \($r.validation.host)  type: \($r.validation.type)  value: \($r.validation.value)",
+      "      app         host: \($r.final.host)  type: \($r.final.type)  value: \($r.final.value)"
+    ' <<<"$records"
+  fi
+  if [ "$(jq 'map(select(.automatic | not)) | length' <<<"$records")" != "0" ]; then
+    echo "==> DNS records to add by hand in Cloudflare (DNS -> Records -> Add record, Proxy status: DNS only)"
+    jq -r '
+      to_entries[] | select(.value.automatic | not) | .key as $app | .value as $r |
+      "    \($app)  (\($r.domain))",
+      (if $r.final != null then
+         "      FINAL    host: \($r.final.host)  type: \($r.final.type)  value: \($r.final.value)",
+         "      (validation record \($r.validation.host) can stay; it keeps the certificate renewing)"
+       else
+         "      PENDING  host: \($r.validation.host)  type: \($r.validation.type)  value: \($r.validation.value)",
+         "               (full name: \($r.validation.name); this proves ownership to AWS. Add it, wait for the",
+         "                certificate to show Issued, rerun this script, then add the app record it prints.)"
+       end)
+    ' <<<"$records"
+  fi
 }
 
 TF_VAR_issued_domains="$(issued_domains)"
@@ -167,7 +210,7 @@ jq -r '.[] | "\(.image):\(.tag) 30apps/\(.name):\(.tag)"' <<<"$AWS_APPS" | while
   crane copy --platform linux/arm64 "$src" "${REGISTRY}/${dst}"
 done
 
-echo "==> Deploying the apps"
+echo "==> Deploying the apps (with automatic DNS, a new custom domain waits up to 15 minutes for its certificate)"
 terraform apply -input=false -auto-approve
 
 echo "==> Checking each app"

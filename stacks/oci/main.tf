@@ -6,6 +6,10 @@
 terraform {
   required_version = ">= 1.12"
   required_providers {
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = "~> 5.0"
+    }
     oci = {
       source  = "oracle/oci"
       version = ">= 6.0, < 9.0"
@@ -23,8 +27,54 @@ provider "oci" {
   region           = var.region
 }
 
+# DNS lives in Cloudflare. Only used when var.manage_dns is true (CI sets it when the
+# CLOUDFLARE_API_TOKEN secret exists). Otherwise no cloudflare resource exists, so the placeholder is
+# never sent anywhere. The real token comes from the CLOUDFLARE_API_TOKEN environment variable.
+provider "cloudflare" {
+  api_token = var.manage_dns ? null : "unused-dns-not-managed"
+}
+
 locals {
-  tags = { project = "30-apps-30-days", managed_by = "terraform" }
+  tags    = { project = "30-apps-30-days", managed_by = "terraform" }
+  catalog = yamldecode(file("${path.module}/../../apps.yaml")).apps
+  # DNS records Terraform owns: only apps on OCI in apps.yaml with a domain, and only with manage_dns.
+  dns_apps = var.manage_dns ? { for a in local.catalog : a.name => a.domain if contains(a.clouds, "oci") && try(a.domain, null) != null } : {}
+  zone_id  = var.cloudflare_zone_id != "" ? var.cloudflare_zone_id : try(data.cloudflare_zone.main[0].id, "")
+}
+
+data "cloudflare_zone" "main" {
+  count = var.manage_dns && var.cloudflare_zone_id == "" ? 1 : 0
+  # Needs Zone:Read on the token. With a DNS:Edit-only token set cloudflare_zone_id instead.
+  filter = {
+    name = var.dns_zone
+  }
+}
+
+# Guard: Terraform may only create records under the app subdomains it is given; never the apex,
+# mail, website or other existing names, and it never manages the zone itself.
+resource "terraform_data" "dns_guard" {
+  for_each = local.dns_apps
+  input    = each.value
+  lifecycle {
+    precondition {
+      condition     = endswith(each.value, ".${var.dns_zone}") && !contains(var.reserved_hosts, trimsuffix(each.value, ".${var.dns_zone}")) && !startswith(each.value, "_")
+      error_message = "App ${each.key}: domain ${each.value} must be a subdomain of ${var.dns_zone} that is not a reserved name (${join(", ", var.reserved_hosts)})."
+    }
+  }
+}
+
+# The host's address for each OCI app's custom domain; Caddy on the VM gets the certificate itself.
+resource "cloudflare_dns_record" "app" {
+  for_each = local.dns_apps
+  zone_id  = local.zone_id
+  name     = each.value
+  type     = "A"
+  content  = oci_core_instance.host.public_ip
+  ttl      = 1
+  proxied  = false
+  comment  = "30-apps-infra: ${each.key} on Oracle Cloud"
+
+  depends_on = [terraform_data.dns_guard]
 }
 
 data "oci_identity_availability_domains" "ads" {
