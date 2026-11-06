@@ -96,34 +96,79 @@ Changing a value takes effect on the next deploy (rerun `deploy/aws.sh` for AWS;
 Google Cloud once wired). Pull-request plans don't have the values, so a plan after secrets exist may show them as changing.
 Terraform state holds the values like it holds the database password, in each cloud's private state bucket.
 
-## Custom domains on AWS
+## Custom domains and DNS (Cloudflare)
 
-DNS for `breakthruventures.ai` stays at Network Solutions and is edited by hand; Terraform never touches DNS.
-An app with a `domain` in `apps.yaml` gets an ACM certificate (DNS validation, us-east-2, free) on every
-deploy. The API Gateway custom domain, its mapping and the switch of `APP_URL` to `https://<domain>` happen only
-once ACM reports that certificate **Issued**: `deploy/aws.sh` asks ACM before applying and passes the issued names
-to Terraform (`TF_VAR_issued_domains`). Until then the app keeps working on its `execute-api` URL, so sign-in
-cookies never break. The `urls` output stays the `execute-api` URLs (the health check uses them); `custom_urls`
-lists the custom ones that exist.
+DNS for `breakthruventures.ai` is hosted at Cloudflare (free plan). Deploys create each app's records
+automatically, but **only** records for apps in `apps.yaml` that have a non-null `domain`. Terraform never
+manages the zone itself and never imports, changes or deletes any other record: email (MX, SPF, DKIM,
+autodiscover, imap, pop, smtp), the website (`@`, `www`), `dev`, `strategy`, `_lovable`, `_acme-challenge`,
+`_dmarc.email` and the rest stay hand-managed. A guard fails the plan if an app's domain is not a subdomain of the
+zone, starts with `_`, or is a reserved name (`www`, `dev`, `strategy`, `email`, `mail`, `autodiscover`, `imap`,
+`pop`, `smtp`, ...; the `reserved_hosts` variable). If a record with the same name already exists, Cloudflare
+refuses the create and the apply fails, so nothing is ever overwritten: delete a stale hand-made record first.
+App records are always `proxied = false` (DNS only), TTL automatic.
 
-Steps (example: app 1, `app1.breakthruventures.ai`):
+### The Cloudflare token
 
-1. Run `deploy/aws.sh` in CloudShell. At the end it prints **DNS records to add at Network Solutions**: a
-   `PENDING` validation CNAME (host like `_3f2a....app1`, value like `_9b1c....acm-validations.aws`).
-2. At Network Solutions: My Domains, `breakthruventures.ai`, Manage Advanced DNS Records, Add, type **CNAME**,
-   host exactly as printed (it is relative to the domain, so don't append `breakthruventures.ai`), value as printed
-   (no trailing dot needed), default TTL. Save.
-3. Wait for the certificate to be issued (usually 5 to 30 minutes after the record is visible):
-   `aws acm list-certificates --region us-east-2 --query "CertificateSummaryList[].[DomainName,Status]" --output text`
-   shows `app1.breakthruventures.ai  ISSUED`.
-4. Rerun `deploy/aws.sh`. It creates the custom domain and mapping, updates the app's `APP_URL`, and now prints a
-   `FINAL` record: CNAME, host `app1`, value `<id>.execute-api.us-east-2.amazonaws.com` (the domain's target).
-5. Add that CNAME at Network Solutions the same way, wait for DNS (`dig +short app1.breakthruventures.ai`), then check
-   `https://app1.breakthruventures.ai/api/health`.
+Create one API token at Cloudflare: My Profile, API Tokens, Create Token, Custom token. Permission:
+**Zone / DNS / Edit**; Zone Resources: Include, Specific zone, `breakthruventures.ai`. Nothing else.
 
-Leave the validation record in place; ACM uses it to renew the certificate. The records are not secrets.
-Anything that was configured with the old `execute-api` URL (for example a GitHub webhook or the tracker's
-`TRACKER_URL`) keeps working, because that URL stays valid.
+| Where | Name | Used by |
+| --- | --- | --- |
+| AWS Parameter Store, SecureString | `/30apps/cloudflare/api_token` | `deploy/aws.sh` (exports `CLOUDFLARE_API_TOKEN`; never printed) |
+| GitHub, Settings, Environments, `production`, secret | `CLOUDFLARE_API_TOKEN` | the Oracle apply step only (passed explicitly, not the whole `secrets` context) |
+
+```
+read -rsp "Token: " V && echo && aws ssm put-parameter --region us-east-2 --name /30apps/cloudflare/api_token --type SecureString --overwrite --value "$V" --query Version --output text; unset V
+```
+
+**Zone ID.** A DNS:Edit-only token cannot look the zone up by name (that needs Zone:Read). Give Terraform the zone
+ID instead (not secret; Cloudflare, `breakthruventures.ai`, Overview, API section, Zone ID):
+AWS: `aws ssm put-parameter --region us-east-2 --name /30apps/cloudflare/zone_id --type String --overwrite --value <zone id>`;
+GitHub: repository variable `CLOUDFLARE_ZONE_ID`. If it is not set, Terraform looks the zone up by name, which works
+only if the token also has Zone / Zone / Read.
+
+Pull-request plans have no token and need none: Terraform only uses Cloudflare when `manage_dns` is true
+(`deploy/aws.sh` sets it when the SSM token exists; the Oracle apply sets it when the secret exists), and
+with it false no Cloudflare resource or lookup exists. Don't switch `manage_dns` back to false after records
+were created: Terraform would plan to delete them and fail without a token. Remove an app's `domain` instead.
+
+### AWS
+
+An app with a `domain` gets an ACM certificate (DNS validation, us-east-2, free). With the token, one run of
+`deploy/aws.sh` does it all: creates the validation CNAME in Cloudflare, waits (up to 15 minutes) for the certificate,
+creates the API Gateway custom domain and mapping, creates the app's CNAME (`<host>` to the domain's
+`target_domain_name`) and switches `APP_URL` to `https://<domain>`. At the end it prints the records, labelled as
+created automatically. The `urls` output stays the `execute-api` URLs (the health check uses them); `custom_urls`
+lists the custom ones that exist. Check `https://app1.breakthruventures.ai/api/health` after the run (DNS is usually
+live within a minute).
+
+**Manual fallback (no token in Parameter Store).** `deploy/aws.sh` says so and uses the old two-phase flow:
+
+1. Run `deploy/aws.sh`. It prints a `PENDING` validation CNAME (host like `_3f2a....app1`, value like
+   `_9b1c....acm-validations.aws`).
+2. In Cloudflare, DNS, Records, Add record: type **CNAME**, name as printed (relative to the zone), target as
+   printed, Proxy status **DNS only**, TTL Auto.
+3. Wait until `aws acm list-certificates --region us-east-2 --query "CertificateSummaryList[].[DomainName,Status]" --output text`
+   shows `ISSUED` (usually 5 to 30 minutes).
+4. Rerun `deploy/aws.sh`. It creates the custom domain and mapping, updates `APP_URL`, and prints a `FINAL` record:
+   CNAME, host `app1`, value `<id>.execute-api.us-east-2.amazonaws.com`. Add it the same way.
+
+Leave the validation record in place; ACM uses it to renew the certificate. Anything configured with the old
+`execute-api` URL (a GitHub webhook, the tracker's `TRACKER_URL`) keeps working, because that URL stays valid.
+
+### Oracle Cloud
+
+An OCI app with a `domain` gets an `A` record to the VM's public IP, created by the Oracle apply on merge to
+`main` when the `CLOUDFLARE_API_TOKEN` secret exists. Caddy on the VM gets the certificate by itself once DNS
+resolves. Without the token, add the `A` record by hand (the `public_ip` output has the address).
+
+### Azure and Google Cloud (not supported yet)
+
+TODO. Custom domains on these clouds need more than a DNS record (Azure Container Apps: CNAME, `asuid` TXT and a
+managed certificate that has to exist before the domain binds; Cloud Run: a domain mapping and Google domain
+verification), so they are not wired up. To avoid a promised URL with no DNS behind it, the plan **fails with an
+explicit error** if an app on `azure` or `gcp` sets `domain`. Leave `domain: null` there. No current app needs it.
 
 **Default URLs** until an app gets a custom domain: Azure `https://app-<name>.<env>.eastus.azurecontainerapps.io`,
 Google Cloud `https://<name>-<project-number>.us-central1.run.app`, Oracle `https://<name>.<ip-with-dashes>.sslip.io`,

@@ -14,10 +14,11 @@ output "custom_urls" {
 }
 
 output "dns_records" {
-  description = "Records to add by hand at Network Solutions, per app with a domain. `validation` proves ownership to ACM (add first); `final` points the app's domain at API Gateway (appears once the certificate is issued and deploy/aws.sh is rerun). Hosts are relative to the zone."
+  description = "DNS records per app with a domain. With `automatic` they are created in Cloudflare by this apply; otherwise add them by hand: `validation` proves ownership to ACM (add first), `final` points the app's domain at API Gateway (appears once the certificate is issued and deploy/aws.sh is rerun). Hosts are relative to the zone."
   value = {
     for name, d in local.domain_apps : name => {
-      domain = d
+      domain    = d
+      automatic = var.manage_dns
       validation = {
         type  = "CNAME"
         host  = trimsuffix(trimsuffix(tolist(aws_acm_certificate.app[name].domain_validation_options)[0].resource_record_name, "."), ".${var.dns_zone}")

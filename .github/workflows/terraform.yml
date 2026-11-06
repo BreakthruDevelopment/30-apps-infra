@@ -2,7 +2,8 @@ name: Terraform
 
 # Pull requests: format check and validation for all four stacks, plus a read-only plan
 #   for Azure and Google Cloud (Oracle's key is readable only from main, so OCI is validated).
-# main: apply Azure, Google Cloud and Oracle from the "production" environment.
+# main: apply Azure, Google Cloud and Oracle from the "production" environment. Oracle's apply also
+#   creates its apps' DNS records in Cloudflare (environment secret CLOUDFLARE_API_TOKEN, that step only).
 # AWS is applied from AWS CloudShell with deploy/aws.sh (see README).
 
 on:
@@ -232,6 +233,12 @@ jobs:
           -backend-config="auth=APIKey"
       - name: Apply (trying each availability domain)
         # Free Ampere capacity is often sold out in one availability domain; try each in turn.
+        # The Cloudflare token (Zone:DNS:Edit on breakthruventures.ai) is passed to this step only; DNS is
+        # managed only when the secret exists, so a missing token never breaks the deploy.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_manage_dns: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          TF_VAR_cloudflare_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID }}
         run: |
           set -o pipefail
           for ad in 0 1 2; do
