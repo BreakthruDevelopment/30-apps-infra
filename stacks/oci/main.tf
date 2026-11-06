@@ -31,7 +31,7 @@ provider "oci" {
 # CLOUDFLARE_API_TOKEN secret exists). Otherwise no cloudflare resource exists, so the placeholder is
 # never sent anywhere. The real token comes from the CLOUDFLARE_API_TOKEN environment variable.
 provider "cloudflare" {
-  api_token = var.manage_dns ? null : "unused-dns-not-managed"
+  api_token = var.manage_dns ? null : "unused_dns_not_managed_00000000000000000" # 40 characters: the provider validates the format even when unused
 }
 
 locals {
@@ -207,6 +207,8 @@ resource "oci_core_instance" "host" {
   lifecycle {
     # Newer Ubuntu images and cloud-init edits shouldn't rebuild the host (and its database).
     # To roll out an agent change, taint the instance deliberately.
-    ignore_changes = [source_details[0].source_id, metadata]
+    # availability_domain: the apply loop tries each AD for free capacity; an existing host must never be
+    # rebuilt just because a different AD was tried this run.
+    ignore_changes = [source_details[0].source_id, metadata, availability_domain]
   }
 }
