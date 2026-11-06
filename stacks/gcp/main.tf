@@ -169,7 +169,7 @@ resource "terraform_data" "domain_unsupported" {
   input    = each.value
   lifecycle {
     precondition {
-      condition     = false
+      condition     = each.value == null
       error_message = "App ${each.key} sets domain ${each.value}, but custom domains are not supported on gcp yet. Set domain: null for this cloud (see README, Custom domains)."
     }
   }
