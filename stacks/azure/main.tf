@@ -103,6 +103,12 @@ resource "azurerm_container_app_environment" "main" {
   resource_group_name = azurerm_resource_group.apps.name
   location            = azurerm_resource_group.apps.location
   tags                = local.tags
+
+  # Azure adds the built-in "Consumption" workload profile on its own. Without this, every plan
+  # proposes removing it in place, which we never want applied.
+  lifecycle {
+    ignore_changes = [workload_profile]
+  }
 }
 
 resource "random_password" "auth" {
