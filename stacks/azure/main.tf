@@ -155,7 +155,10 @@ resource "azurerm_container_app" "app" {
   container_app_environment_id = azurerm_container_app_environment.main.id
   resource_group_name          = azurerm_resource_group.apps.name
   revision_mode                = "Single"
-  tags                         = local.tags
+  # Azure runs every app on the environment's built-in Consumption profile and reports it back;
+  # leaving this null made each apply "change" it to null again.
+  workload_profile_name = "Consumption"
+  tags                  = local.tags
 
   secret {
     name  = "database-url"
