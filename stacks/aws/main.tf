@@ -38,7 +38,7 @@ provider "aws" {
 # token is in Parameter Store). Otherwise no cloudflare resource exists, so the placeholder is never
 # sent anywhere. The real token comes from the CLOUDFLARE_API_TOKEN environment variable.
 provider "cloudflare" {
-  api_token = var.manage_dns ? null : "unused-dns-not-managed"
+  api_token = var.manage_dns ? null : "unused_dns_not_managed_00000000000000000" # 40 characters: the provider validates the format even when unused
 }
 
 locals {
