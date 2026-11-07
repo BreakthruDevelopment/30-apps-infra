@@ -7,7 +7,7 @@
 #   - two app registrations GitHub Actions signs in as, with no secrets (federated credentials),
 #     usable ONLY by BreakthruDevelopment/30-apps-infra:
 #       github-30apps-deploy  (Contributor; only the "production" environment, which is limited to main)
-#       github-30apps-plan    (Reader; pull requests, for terraform plan)
+#       github-30apps-plan    (Reader + read container app secrets; pull requests, for terraform plan)
 #   - registers the resource providers the apps need
 # Safe to run again.
 set -euo pipefail
@@ -87,6 +87,28 @@ assign "$DEPLOY_APP" Contributor "/subscriptions/${SUB}"
 assign "$DEPLOY_APP" "Storage Blob Data Contributor" "$SA_ID"
 assign "$PLAN_APP" Reader "/subscriptions/${SUB}"
 assign "$PLAN_APP" "Storage Blob Data Reader" "$SA_ID"
+
+# terraform plan refreshes each container app, which reads its secrets (listSecrets). Reader can't,
+# so pull-request plans failed with 403. This custom role adds only that one action. Pull requests
+# from forks can't get an OIDC token, so only branches in this repo can use it.
+PLAN_ROLE="30apps Terraform Plan (read container app secrets)"
+if ! az role definition list --custom-role-only true --name "$PLAN_ROLE" --query "[].roleName" -o tsv | grep -q .; then
+  az role definition create -o none --role-definition "{
+    \"Name\": \"${PLAN_ROLE}\",
+    \"Description\": \"Lets the GitHub pull-request plan identity read Container App secrets during terraform plan.\",
+    \"Actions\": [\"Microsoft.App/containerApps/listSecrets/action\"],
+    \"AssignableScopes\": [\"/subscriptions/${SUB}\"]}"
+  sleep 20  # new role definitions take a moment to become assignable
+fi
+PLAN_SP="$(az ad sp show --id "$PLAN_APP" --query id -o tsv)"
+for attempt in 1 2 3 4 5 6; do
+  if az role assignment list --assignee "$PLAN_SP" --role "$PLAN_ROLE" --scope "/subscriptions/${SUB}" --query "[].id" -o tsv 2>/dev/null | grep -q .; then
+    echo "Plan identity can read container app secrets"; break
+  fi
+  az role assignment create --assignee-object-id "$PLAN_SP" --assignee-principal-type ServicePrincipal \
+    --role "$PLAN_ROLE" --scope "/subscriptions/${SUB}" -o none 2>/dev/null || sleep 15
+  [ "$attempt" = 6 ] && { echo "ERROR: could not assign '${PLAN_ROLE}' to github-30apps-plan; run this script again in a minute."; exit 1; }
+done
 echo "Roles assigned"
 
 cat <<EOF
