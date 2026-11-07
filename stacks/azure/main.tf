@@ -78,6 +78,15 @@ resource "azurerm_postgresql_flexible_server_firewall_rule" "azure_services" {
   end_ip_address   = "0.0.0.0"
 }
 
+# Allow-list Postgres extensions. Azure refuses CREATE EXTENSION for anything not listed in
+# azure.extensions (a dynamic parameter, so no restart). This setting is a whole-list override: it
+# replaces whatever is allow-listed today, so add new extensions to var.pg_allowed_extensions.
+resource "azurerm_postgresql_flexible_server_configuration" "extensions" {
+  name      = "azure.extensions"
+  server_id = azurerm_postgresql_flexible_server.main.id
+  value     = upper(join(",", var.pg_allowed_extensions))
+}
+
 resource "azurerm_postgresql_flexible_server_database" "app" {
   for_each  = local.apps
   name      = replace(each.key, "-", "_")
@@ -94,6 +103,12 @@ resource "azurerm_container_app_environment" "main" {
   resource_group_name = azurerm_resource_group.apps.name
   location            = azurerm_resource_group.apps.location
   tags                = local.tags
+
+  # Azure adds the built-in "Consumption" workload profile on its own. Without this, every plan
+  # proposes removing it in place, which we never want applied.
+  lifecycle {
+    ignore_changes = [workload_profile]
+  }
 }
 
 resource "random_password" "auth" {

@@ -163,6 +163,19 @@ An OCI app with a `domain` gets an `A` record to the VM's public IP, created by 
 `main` when the `CLOUDFLARE_API_TOKEN` secret exists. Caddy on the VM gets the certificate by itself once DNS
 resolves. Without the token, add the `A` record by hand (the `public_ip` output has the address).
 
+### Azure Postgres extensions
+
+The shared Flexible Server allow-lists **pgvector** (`azure.extensions = VECTOR`, set in `stacks/azure/main.tf` from the
+`pg_allowed_extensions` variable). Azure only lets `CREATE EXTENSION` run for allow-listed names. An app that needs
+pgvector runs `CREATE EXTENSION IF NOT EXISTS vector` in its first migration (it migrates itself on startup).
+
+To allow another extension, add its upper-case name to the `pg_allowed_extensions` default in
+`stacks/azure/variables.tf` (keep `"VECTOR"` in the list; the setting replaces the whole list), open a PR and check
+that the plan changes only `azurerm_postgresql_flexible_server_configuration.extensions`. `azure.extensions` is a
+dynamic parameter, so applying it needs no server restart. Extensions that need `shared_preload_libraries` are a
+different, static parameter and are not covered here. Confirm the installed pgvector version with
+`SELECT default_version FROM pg_available_extensions WHERE name = 'vector'` (needs the live server).
+
 ### Azure and Google Cloud (not supported yet)
 
 TODO. Custom domains on these clouds need more than a DNS record (Azure Container Apps: CNAME, `asuid` TXT and a

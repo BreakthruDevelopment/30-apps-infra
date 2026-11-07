@@ -15,6 +15,12 @@ variable "pg_location" {
   default     = "centralus" # eastus, eastus2, westus2, southcentralus don't offer B1ms to this subscription
 }
 
+variable "pg_allowed_extensions" {
+  description = "Postgres extensions apps may CREATE EXTENSION on the shared server (azure.extensions). Joined with commas and upper-cased. pgvector is VECTOR."
+  type        = list(string)
+  default     = ["VECTOR"]
+}
+
 variable "max_instances" {
   description = "Upper bound on replicas per app. Kept at 1 so nothing can grow past the free grant; raising it is the scale story."
   type        = number
