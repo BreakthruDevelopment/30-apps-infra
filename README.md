@@ -220,8 +220,8 @@ Terraform switches `APP_URL` to `https://<domain>` only when the mapping's `Read
 rerun the workflow (**Actions, Terraform, Run workflow** on `main`) after the certificate is issued, and the refresh
 sees it and updates the service. The `custom_domain_ready` output shows which apps have switched. The mapping names
 the service as a plain string, so it never depends on the service (which reads the mapping's status): no cycle.
-The mapping and the service are therefore created in parallel; if the first apply fails because the service did not
-exist yet, rerun the workflow.
+The service reads the mapping's status, so Terraform always creates the mapping before it creates or updates the service, and the mapping's service must already exist. Add a new app with `domain: null` first, and set `domain` in a later PR once its service is deployed.
+If `Ready` is briefly not `True` (for example during certificate renewal), the next apply flips `APP_URL` back to the run.app URL until it is ready again.
 
 An app's upload bucket (`storage: true`) allows CORS from the custom origin as well as run.app, from the first apply,
 only for apps that have a `domain`. The `urls` output stays on run.app (the health check uses it);

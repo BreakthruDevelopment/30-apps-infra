@@ -180,7 +180,8 @@ resource "random_password" "auth" {
 #      Google sees its own host when it issues the managed certificate (15 minutes to 24 hours).
 # APP_URL stays on the run.app URL until the mapping's Ready condition is True in state, so sign-in never
 # breaks while the certificate is pending. Rerun the workflow (workflow_dispatch) after the certificate is
-# issued: the refresh sees Ready and the next plan switches APP_URL.
+# issued: the refresh sees Ready and the next plan switches APP_URL. (try() on an unknown returns unknown, so on
+# the create apply APP_URL is known-after-apply and resolves to run.app: the provider returns at CertificatePending.)
 
 locals {
   default_url = { for name, a in local.apps : name => "https://${name}-${var.project_number}.${var.region}.run.app" }
@@ -246,7 +247,8 @@ resource "google_cloud_run_domain_mapping" "app" {
 
   spec {
     # The service's name as a plain string, not a reference: the service reads this mapping's status for
-    # APP_URL, so a reference back would be a cycle.
+    # APP_URL, so a reference back would be a cycle. Consequence: Terraform always creates the mapping before
+    # the service, so the service must already exist (add an app with domain: null first, domain later).
     route_name       = each.key
     certificate_mode = "AUTOMATIC"
   }
@@ -265,10 +267,12 @@ resource "cloudflare_dns_record" "cname" {
   name     = each.value
   type     = "CNAME"
   # Google returns "ghs.googlehosted.com." (trailing dot); Cloudflare stores it without.
-  content = trimsuffix([for r in google_cloud_run_domain_mapping.app[each.key].status[0].resource_records : r.rrdata if r.type == "CNAME"][0], ".")
+  content = trimsuffix(try(one([for r in google_cloud_run_domain_mapping.app[each.key].status[0].resource_records : r.rrdata if r.type == "CNAME"]), "ghs.googlehosted.com."), ".")
   ttl     = 1
   proxied = false # Google must see its own host to issue the certificate
   comment = "30-apps-infra: ${each.key} on Cloud Run"
+
+  depends_on = [terraform_data.dns_guard]
 }
 
 resource "google_cloud_run_v2_service" "app" {
