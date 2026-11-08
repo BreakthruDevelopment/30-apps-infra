@@ -28,5 +28,5 @@ apps:
     clouds: [azure]
     image: ghcr.io/breakthrudevelopment/02-notes-kb
     tag: sha-fb16222
-    domain: null
+    domain: app2.breakthruventures.ai
     ai: gemini
