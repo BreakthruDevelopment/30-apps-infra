@@ -455,7 +455,7 @@ resource "google_storage_bucket" "uploads" {
       try(each.value.domain, null) != null ? ["https://${each.value.domain}"] : [],
     )
     method          = ["PUT"]
-    response_header = ["Content-Type", "x-goog-content-length-range"]
+    response_header = ["Content-Type", "x-goog-content-length-range", "x-goog-if-generation-match"]
     max_age_seconds = 3600
   }
 }
