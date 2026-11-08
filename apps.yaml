@@ -36,6 +36,6 @@ apps:
     clouds: [gcp]
     image: ghcr.io/breakthrudevelopment/03-expense-tracker
     tag: sha-3dc6006
-    domain: null
+    domain: app3.breakthruventures.ai
     ai: gemini
     storage: true
