@@ -35,7 +35,7 @@ apps:
     title: Expense Tracker
     clouds: [gcp]
     image: ghcr.io/breakthrudevelopment/03-expense-tracker
-    tag: sha-e0b749e
+    tag: sha-3dc6006
     domain: null
     ai: gemini
     storage: true
