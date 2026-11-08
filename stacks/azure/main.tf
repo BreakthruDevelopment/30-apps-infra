@@ -170,18 +170,18 @@ data "cloudflare_zone" "main" {
 resource "terraform_data" "dns_guard" {
   for_each = local.domain_apps
   input    = each.value
+
+  # Without the Cloudflare token the DNS records can't be created, and Azure then refuses the custom
+  # domain after the app has already switched APP_URL. Fail the plan instead of half-applying.
   lifecycle {
+    precondition {
+      condition     = var.manage_dns
+      error_message = "App ${each.key} has domain ${each.value}, but no Cloudflare token reached this run (manage_dns is false). Add the CLOUDFLARE_API_TOKEN secret (and CLOUDFLARE_ZONE_ID variable) to the production environment, or set domain: null."
+    }
     precondition {
       condition     = endswith(each.value, ".${var.dns_zone}") && !contains(var.reserved_hosts, trimsuffix(each.value, ".${var.dns_zone}")) && !startswith(each.value, "_")
       error_message = "App ${each.key}: domain ${each.value} must be a subdomain of ${var.dns_zone} that is not a reserved name (${join(", ", var.reserved_hosts)})."
     }
-  }
-}
-
-check "dns_managed" {
-  assert {
-    condition     = var.manage_dns || length(local.domain_apps) == 0
-    error_message = "manage_dns is false (no Cloudflare token), so the DNS records for ${join(", ", values(local.domain_apps))} are not planned. An apply without the token fails when Azure cannot find them."
   }
 }
 
