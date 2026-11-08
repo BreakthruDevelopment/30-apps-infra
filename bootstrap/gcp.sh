@@ -9,6 +9,16 @@
 #   - two service accounts GitHub Actions acts as, with no keys:
 #       gh-30apps-deploy  (Editor + Cloud Run admin; only the "production" environment, limited to main)
 #       gh-30apps-plan    (Viewer; pull requests, for terraform plan)
+#   - for opt-in private upload buckets (apps.yaml `storage: true`), the narrow IAM Terraform can't set itself:
+#       custom role tf30appsBucketIam (storage.buckets.getIamPolicy + setIamPolicy) granted to gh-30apps-deploy at
+#         project level. Editor already creates/updates buckets and objects but cannot read or set bucket IAM; this
+#         is all it adds (not storage.admin, which would also allow object and HMAC-key management).
+#       custom role tf30appsBucketIamRead (storage.buckets.getIamPolicy only) granted to gh-30apps-plan, so a PR
+#         plan can refresh bucket IAM members (Viewer may not include it).
+#       roles/iam.serviceAccountTokenCreator on cloud-run-apps@ granted to cloud-run-apps@ itself (signBlob for V4
+#         signed URLs, no keys). Done here because setting a service account's IAM policy needs rights the deploy
+#         identity deliberately lacks. Skipped with a message if that account doesn't exist yet (Terraform creates
+#         it on the first Google Cloud deploy): rerun this script after that.
 # Safe to run again.
 set -euo pipefail
 
@@ -39,7 +49,7 @@ echo "Project ${PROJECT} (${NUMBER}), region ${REGION}"
 
 gcloud services enable run.googleapis.com artifactregistry.googleapis.com compute.googleapis.com \
   iam.googleapis.com iamcredentials.googleapis.com sts.googleapis.com secretmanager.googleapis.com \
-  cloudresourcemanager.googleapis.com serviceusage.googleapis.com
+  cloudresourcemanager.googleapis.com serviceusage.googleapis.com storage.googleapis.com
 echo "APIs enabled"
 
 # --- Terraform state ----------------------------------------------------------
@@ -81,6 +91,30 @@ grant() {  # retries: brand-new service accounts take a few seconds to be visibl
 }
 for r in roles/editor roles/run.admin roles/iam.serviceAccountUser roles/secretmanager.admin; do grant "$DEPLOY_SA" "$r"; done
 for r in roles/viewer roles/secretmanager.secretAccessor; do grant "$PLAN_SA" "$r"; done
+
+# Custom roles: bucket IAM only (create if missing, otherwise bring permissions up to date).
+ensure_role() {  # id, title, permissions
+  if gcloud iam roles describe "$1" --project="$PROJECT" >/dev/null 2>&1; then
+    gcloud iam roles update "$1" --project="$PROJECT" --title="$2" --permissions="$3" --quiet >/dev/null
+  else
+    gcloud iam roles create "$1" --project="$PROJECT" --title="$2" --permissions="$3" --stage=GA >/dev/null
+  fi
+}
+ensure_role tf30appsBucketIam "30 apps Terraform bucket IAM" storage.buckets.getIamPolicy,storage.buckets.setIamPolicy
+ensure_role tf30appsBucketIamRead "30 apps plan bucket IAM read" storage.buckets.getIamPolicy
+grant "$DEPLOY_SA" "projects/${PROJECT}/roles/tf30appsBucketIam"
+grant "$PLAN_SA" "projects/${PROJECT}/roles/tf30appsBucketIamRead"
+
+# Signed URLs without keys: the Cloud Run service account may sign as itself (IAM signBlob).
+RUN_SA="cloud-run-apps@${PROJECT}.iam.gserviceaccount.com"
+if gcloud iam service-accounts describe "$RUN_SA" >/dev/null 2>&1; then
+  gcloud iam service-accounts add-iam-policy-binding "$RUN_SA" --role=roles/iam.serviceAccountTokenCreator \
+    --member="serviceAccount:${RUN_SA}" >/dev/null
+  echo "${RUN_SA} may sign as itself"
+else
+  echo "NOTE: ${RUN_SA} doesn't exist yet (the first Google Cloud deploy creates it). Rerun this script after that deploy."
+fi
+
 gcloud storage buckets add-iam-policy-binding "gs://${BUCKET}" --member="serviceAccount:${PLAN_SA}" \
   --role=roles/storage.objectViewer >/dev/null
 

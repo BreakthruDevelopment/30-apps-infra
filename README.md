@@ -208,3 +208,37 @@ Leave `domain: null` there. No current app needs it.
 **Default URLs** until an app gets a custom domain: Azure `https://app-<name>.<env>.eastus.azurecontainerapps.io`,
 Google Cloud `https://<name>-<project-number>.us-central1.run.app`, Oracle `https://<name>.<ip-with-dashes>.sslip.io`,
 AWS `https://<id>.execute-api.us-east-2.amazonaws.com`. Each deploy prints them.
+
+## Object storage (Google Cloud)
+
+An app opts in with `storage: true` in `apps.yaml` (only `gcp` honours it; other stacks ignore it). Terraform then
+creates one private bucket per app, `<project-id>-<app>-uploads`, in the stack region (us-central1), and sets
+`STORAGE_BUCKET` (and `UPLOAD_BUCKET`, same value) on the app's Cloud Run service.
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| Access | Uniform bucket-level access, public access prevention enforced | Nothing is ever public; reads and writes go through short-lived V4 signed URLs |
+| Soft delete | Off (retention 0) | Soft-deleted bytes are billed |
+| Versioning | Off | Noncurrent versions would be billed |
+| Lifecycle | Delete after 90 days, objects under `u/` | Caps stored bytes |
+| CORS | `PUT` only, from the app's origin(s) (run.app URL, plus `https://<domain>` when set); headers `Content-Type`, `x-goog-content-length-range` | Browser uploads straight to the bucket; downloads are plain navigation or `<img>` and need no CORS |
+| Object access | `roles/storage.objectUser` for `cloud-run-apps` on that bucket only | No project-level storage role |
+| Signing | The run service account signs through IAM `signBlob` as itself; no keys exist | Needs `roles/iam.serviceAccountTokenCreator` on itself |
+
+**Free tier** (always-free, all buckets combined): 5 GB-months of regional storage in us-central1, us-east1 or
+us-west1, 5,000 Class A and 50,000 Class B operations a month, 100 GB egress from North America. Terraform only
+guarantees the region and storage class; operations are not metered here, so each app counts its own uploads and
+reads against these numbers (see the app's spec).
+
+**Bootstrap rights.** The deploy identity has Editor, which creates buckets and objects but cannot read or set IAM
+policies. `bootstrap/gcp.sh` (rerun it once in Cloud Shell; it is idempotent) therefore adds:
+
+- custom role `tf30appsBucketIam` (`storage.buckets.getIamPolicy`, `storage.buckets.setIamPolicy`) for `gh-30apps-deploy`,
+  so Terraform can manage the bucket IAM member (narrower than `roles/storage.admin`);
+- custom role `tf30appsBucketIamRead` (`storage.buckets.getIamPolicy`) for `gh-30apps-plan`, so pull-request plans can
+  refresh bucket IAM;
+- `roles/iam.serviceAccountTokenCreator` on `cloud-run-apps@<project>.iam.gserviceaccount.com`, granted to that same
+  account (done in bootstrap because Terraform would need `iam.serviceAccounts.setIamPolicy`, i.e. service-account
+  admin, to do it). If the account doesn't exist yet the script says so; rerun it after the first Google Cloud deploy.
+
+It also enables `storage.googleapis.com`.

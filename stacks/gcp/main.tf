@@ -268,6 +268,13 @@ resource "google_cloud_run_v2_service" "app" {
         value = "3"
       }
       dynamic "env" {
+        for_each = contains(keys(local.storage_apps), each.key) ? toset(["STORAGE_BUCKET", "UPLOAD_BUCKET"]) : toset([])
+        content {
+          name  = env.value
+          value = google_storage_bucket.uploads[each.key].name
+        }
+      }
+      dynamic "env" {
         for_each = toset(local.app_secret_names[each.key])
         content {
           name  = env.value
@@ -307,4 +314,65 @@ locals {
   app_secret_names = { for name, a in local.apps : name => [
     for v in try(a.secrets, []) : v if contains(nonsensitive(keys(try(var.app_secrets[name], {}))), v)
   ] }
+}
+
+# --- Private upload buckets (opt-in: `storage: true` in apps.yaml) ---------------------------
+# One bucket per app, in the stack region (us-central1 regional storage is in the always-free 5 GB).
+# Objects are never public: uniform bucket-level access, public access prevention enforced, and the
+# app hands browsers short-lived V4 signed URLs. Signing uses IAM signBlob as the run service account
+# (no keys); that account's tokenCreator-on-itself binding is made by bootstrap/gcp.sh, because the
+# deploy identity cannot set service-account IAM policies.
+
+locals {
+  storage_apps = { for name, a in local.apps : name => a if try(a.storage, false) }
+}
+
+resource "google_storage_bucket" "uploads" {
+  for_each      = local.storage_apps
+  name          = "${var.project_id}-${each.key}-uploads"
+  location      = var.region
+  storage_class = "STANDARD"
+  labels        = local.labels
+  force_destroy = false
+
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+
+  versioning {
+    enabled = false
+  }
+
+  # Soft-deleted bytes are billed, so keep none.
+  soft_delete_policy {
+    retention_duration_seconds = 0
+  }
+
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      age            = 90
+      matches_prefix = ["u/"]
+    }
+  }
+
+  # Browsers PUT directly to the bucket from the app's own origin(s) only.
+  cors {
+    origin = distinct([
+      "https://${each.key}-${var.project_number}.${var.region}.run.app",
+      local.app_url[each.key],
+    ])
+    method          = ["PUT"]
+    response_header = ["Content-Type", "x-goog-content-length-range"]
+    max_age_seconds = 3600
+  }
+}
+
+# Object access for this app's service account, on this bucket only (no project-level storage role).
+resource "google_storage_bucket_iam_member" "uploads_run" {
+  for_each = local.storage_apps
+  bucket   = google_storage_bucket.uploads[each.key].name
+  role     = "roles/storage.objectUser"
+  member   = "serviceAccount:${google_service_account.run.email}"
 }
