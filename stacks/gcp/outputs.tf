@@ -1,6 +1,16 @@
 output "urls" {
-  description = "Public URL of each app."
-  value       = local.app_url
+  description = "Public run.app URL of each app (used by the health check; always valid)."
+  value       = local.default_url
+}
+
+output "custom_urls" {
+  description = "Custom URL of each app with a domain (the certificate may still be pending; see README)."
+  value       = { for name, d in local.domain_apps : name => "https://${d}" }
+}
+
+output "custom_domain_ready" {
+  description = "Whether each custom domain's mapping is Ready, i.e. APP_URL uses it."
+  value       = local.domain_ready
 }
 
 output "mirror_images" {

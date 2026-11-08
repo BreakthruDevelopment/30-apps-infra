@@ -3,7 +3,7 @@ name: Terraform
 # Pull requests: format check and validation for all four stacks, plus a read-only plan
 #   for Azure and Google Cloud (Oracle's key is readable only from main, so OCI is validated).
 # main: apply Azure, Google Cloud and Oracle from the "production" environment. Oracle's apply also
-#   creates its apps' DNS records in Cloudflare, and so does Azure's, for custom domains (environment secret
+#   creates its apps' DNS records in Cloudflare, and so do Azure's and Google Cloud's, for custom domains (environment secret
 #   CLOUDFLARE_API_TOKEN, passed to those apply steps only). Pull-request plans never get the token.
 # AWS is applied from AWS CloudShell with deploy/aws.sh (see README).
 
@@ -98,6 +98,11 @@ jobs:
       TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
       TF_VAR_project_number: ${{ vars.GCP_PROJECT_NUMBER }}
       TF_VAR_region: ${{ vars.GCP_REGION }}
+      # No Cloudflare token on pull requests (a PR branch could print it). manage_dns is on with a dummy token
+      # and the plan skips the refresh, so it lists the records an apply would create without calling Cloudflare.
+      TF_VAR_manage_dns: "true"
+      TF_VAR_cloudflare_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID || 'plan-only-zone-id-not-used' }}
+      CLOUDFLARE_API_TOKEN: "unused_plan_only_no_dns_calls_00000000000"
     defaults:
       run:
         working-directory: stacks/gcp
@@ -111,7 +116,7 @@ jobs:
         with:
           terraform_version: "^1.12.0"
       - run: terraform init -lock=false -backend-config="bucket=${{ vars.GCP_STATE_BUCKET }}" -backend-config="prefix=gcp"
-      - run: terraform plan -lock=false -no-color
+      - run: terraform plan -lock=false -refresh=false -no-color
 
   apply-azure:
     name: Apply azure
@@ -201,7 +206,14 @@ jobs:
             echo "copy $image:$tag -> $REPO/$name:$tag"
             crane copy --platform linux/amd64 "$image:$tag" "$REPO/$name:$tag"
           done
-      - run: terraform apply -auto-approve -no-color
+      - name: Apply
+        # The Cloudflare token (Zone:DNS:Edit on breakthruventures.ai) is passed to this step only; DNS is
+        # managed only when the secret exists.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_manage_dns: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          TF_VAR_cloudflare_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID }}
+        run: terraform apply -auto-approve -no-color
       - name: Health check
         run: bash ../../deploy/health.sh "$(terraform output -json urls)"
 

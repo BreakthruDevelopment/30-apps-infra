@@ -10,6 +10,10 @@ terraform {
       source  = "hashicorp/google"
       version = ">= 6.20, < 8.0"
     }
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = "~> 5.0"
+    }
     random = {
       source  = "hashicorp/random"
       version = "~> 3.6"
@@ -22,6 +26,13 @@ terraform {
 provider "google" {
   project = var.project_id
   region  = var.region
+}
+
+# DNS lives in Cloudflare. Only used when var.manage_dns is true (CI sets it when the
+# CLOUDFLARE_API_TOKEN secret exists). Otherwise no cloudflare resource exists, so the placeholder is
+# never sent anywhere. The real token comes from the CLOUDFLARE_API_TOKEN environment variable.
+provider "cloudflare" {
+  api_token = var.manage_dns ? null : "unused_dns_not_managed_00000000000000000" # 40 characters: the provider validates the format even when unused
 }
 
 locals {
@@ -161,28 +172,103 @@ resource "random_password" "auth" {
   special  = false
 }
 
-# Custom domains are not wired up on gcp yet. Fail the plan loudly instead of promising a URL
-# (APP_URL) whose DNS and certificate nobody creates. TODO: see README "Custom domains".
-# Cloud Run (needs a domain mapping and Google domain verification).
-resource "terraform_data" "domain_unsupported" {
-  for_each = { for name, a in local.apps : name => a.domain if try(a.domain, null) != null }
+# --- Custom domains (Cloud Run domain mapping + Cloudflare DNS) ----------------------------------
+# For an app with a domain, one apply creates:
+#   1. google_cloud_run_domain_mapping (free, no load balancer; Preview in Google Cloud). The deploy
+#      identity must be a verified owner of the domain in Search Console (done once, by hand).
+#   2. A Cloudflare CNAME <domain> -> ghs.googlehosted.com (from the mapping's resource_records), DNS only so
+#      Google sees its own host when it issues the managed certificate (15 minutes to 24 hours).
+# APP_URL stays on the run.app URL until the mapping's Ready condition is True in state, so sign-in never
+# breaks while the certificate is pending. Rerun the workflow (workflow_dispatch) after the certificate is
+# issued: the refresh sees Ready and the next plan switches APP_URL.
+
+locals {
+  default_url = { for name, a in local.apps : name => "https://${name}-${var.project_number}.${var.region}.run.app" }
+  domain_apps = { for name, a in local.apps : name => a.domain if try(a.domain, null) != null }
+  # DNS records Terraform owns: only apps on gcp in apps.yaml with a domain, and only with manage_dns.
+  dns_apps = var.manage_dns ? local.domain_apps : {}
+  zone_id  = var.cloudflare_zone_id != "" ? var.cloudflare_zone_id : try(data.cloudflare_zone.main[0].id, "")
+
+  # True only when state says the mapping is Ready. Unknown (just created) or missing counts as not ready, so
+  # the apply that creates the mapping keeps the run.app URL. The mapping never references the service (it
+  # names it as a string), so the service may read the mapping's status without a dependency cycle. Once Ready
+  # is True it stays True, so there is no perpetual diff.
+  domain_ready = {
+    for name, d in local.domain_apps : name => try(
+      anytrue([for c in google_cloud_run_domain_mapping.app[name].status[0].conditions : c.type == "Ready" && c.status == "True"]),
+      false,
+    )
+  }
+
+  app_url = {
+    for name, a in local.apps : name => (
+      lookup(local.domain_ready, name, false) ? "https://${local.domain_apps[name]}" : local.default_url[name]
+    )
+  }
+}
+
+data "cloudflare_zone" "main" {
+  count = var.manage_dns && var.cloudflare_zone_id == "" ? 1 : 0
+  # Needs Zone:Read on the token. With a DNS:Edit-only token set cloudflare_zone_id instead.
+  filter = {
+    name = var.dns_zone
+  }
+}
+
+# Guard: Terraform may only create records under the app subdomains it is given; never the apex,
+# mail, website or other existing names, and it never manages the zone itself.
+resource "terraform_data" "dns_guard" {
+  for_each = local.domain_apps
   input    = each.value
+
+  # Without the Cloudflare token the CNAME can't be created, so the certificate would never be issued.
+  # Fail the plan instead of half-applying.
   lifecycle {
     precondition {
-      condition     = each.value == null
-      error_message = "App ${each.key} sets domain ${each.value}, but custom domains are not supported on gcp yet. Set domain: null for this cloud (see README, Custom domains)."
+      condition     = var.manage_dns
+      error_message = "App ${each.key} has domain ${each.value}, but no Cloudflare token reached this run (manage_dns is false). Add the CLOUDFLARE_API_TOKEN secret (and CLOUDFLARE_ZONE_ID variable) to the production environment, or set domain: null."
+    }
+    precondition {
+      condition     = endswith(each.value, ".${var.dns_zone}") && !contains(var.reserved_hosts, trimsuffix(each.value, ".${var.dns_zone}")) && !startswith(each.value, "_")
+      error_message = "App ${each.key}: domain ${each.value} must be a subdomain of ${var.dns_zone} that is not a reserved name (${join(", ", var.reserved_hosts)})."
     }
   }
 }
 
-locals {
-  app_url = {
-    for name, a in local.apps : name => (
-      try(a.domain, null) != null
-      ? "https://${a.domain}"
-      : "https://${name}-${var.project_number}.${var.region}.run.app"
-    )
+resource "google_cloud_run_domain_mapping" "app" {
+  for_each = local.domain_apps
+  location = var.region
+  name     = each.value
+
+  metadata {
+    namespace = var.project_id
   }
+
+  spec {
+    # The service's name as a plain string, not a reference: the service reads this mapping's status for
+    # APP_URL, so a reference back would be a cycle.
+    route_name       = each.key
+    certificate_mode = "AUTOMATIC"
+  }
+
+  depends_on = [terraform_data.dns_guard]
+
+  lifecycle {
+    # Google adds annotations and labels of its own.
+    ignore_changes = [metadata[0].annotations, metadata[0].labels]
+  }
+}
+
+resource "cloudflare_dns_record" "cname" {
+  for_each = local.dns_apps
+  zone_id  = local.zone_id
+  name     = each.value
+  type     = "CNAME"
+  # Google returns "ghs.googlehosted.com." (trailing dot); Cloudflare stores it without.
+  content = trimsuffix([for r in google_cloud_run_domain_mapping.app[each.key].status[0].resource_records : r.rrdata if r.type == "CNAME"][0], ".")
+  ttl     = 1
+  proxied = false # Google must see its own host to issue the certificate
+  comment = "30-apps-infra: ${each.key} on Cloud Run"
 }
 
 resource "google_cloud_run_v2_service" "app" {
@@ -359,10 +445,11 @@ resource "google_storage_bucket" "uploads" {
 
   # Browsers PUT directly to the bucket from the app's own origin(s) only.
   cors {
-    origin = distinct([
-      "https://${each.key}-${var.project_number}.${var.region}.run.app",
-      local.app_url[each.key],
-    ])
+    # Static, so the bucket never waits on the domain mapping; the custom origin only for apps with a domain.
+    origin = concat(
+      [local.default_url[each.key]],
+      try(each.value.domain, null) != null ? ["https://${each.value.domain}"] : [],
+    )
     method          = ["PUT"]
     response_header = ["Content-Type", "x-goog-content-length-range"]
     max_age_seconds = 3600
