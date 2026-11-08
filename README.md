@@ -116,7 +116,7 @@ Create one API token at Cloudflare: My Profile, API Tokens, Create Token, Custom
 | Where | Name | Used by |
 | --- | --- | --- |
 | AWS Parameter Store, SecureString | `/30apps/cloudflare/api_token` | `deploy/aws.sh` (exports `CLOUDFLARE_API_TOKEN`; never printed) |
-| GitHub, Settings, Environments, `production`, secret | `CLOUDFLARE_API_TOKEN` | the Azure and Oracle apply steps only (passed explicitly, not the whole `secrets` context) |
+| GitHub, Settings, Environments, `production`, secret | `CLOUDFLARE_API_TOKEN` | the Azure, Google Cloud and Oracle apply steps only (passed explicitly, not the whole `secrets` context) |
 
 ```
 read -rsp "Token: " V && echo && aws ssm put-parameter --region us-east-2 --name /30apps/cloudflare/api_token --type SecureString --overwrite --value "$V" --query Version --output text; unset V
@@ -129,8 +129,8 @@ GitHub: repository variable `CLOUDFLARE_ZONE_ID`. If it is not set, Terraform lo
 only if the token also has Zone / Zone / Read.
 
 Pull-request plans never get the token (a PR branch could print it). Terraform only uses Cloudflare when
-`manage_dns` is true (`deploy/aws.sh` sets it when the SSM token exists; the Azure and Oracle applies set it when
-the secret exists), and with it false no Cloudflare resource or lookup exists. The Azure PR plan sets `manage_dns`
+`manage_dns` is true (`deploy/aws.sh` sets it when the SSM token exists; the Azure, Google Cloud and Oracle applies set it when
+the secret exists), and with it false no Cloudflare resource or lookup exists. The Azure and Google Cloud PR plans set `manage_dns`
 with a dummy token and skips the refresh (`-refresh=false`), so it lists the records an apply would create without
 calling Cloudflare. Don't switch `manage_dns` back to false after records
 were created: Terraform would plan to delete them and fail without a token. Remove an app's `domain` instead.
@@ -199,11 +199,35 @@ depends on it, so for the few minutes before the certificate is bound, sign-in o
 check expects the custom URL); the default URL still serves pages. Without the token the plan still works and
 warns that the DNS records are not planned; an apply would fail at step 2, so keep the secret set.
 
-### Google Cloud (not supported yet)
+### Google Cloud
 
-TODO. Cloud Run custom domains need a domain mapping and Google domain verification, so they are not wired up. To avoid
-a promised URL with no DNS behind it, the plan **fails with an explicit error** if an app on `gcp` sets `domain`.
-Leave `domain: null` there. No current app needs it.
+A Google Cloud app with a `domain` gets, in one apply on merge to `main` (needs the `CLOUDFLARE_API_TOKEN` secret):
+
+1. `google_cloud_run_domain_mapping` (`certificate_mode = AUTOMATIC`) from the domain to the Cloud Run service.
+   Domain mappings are **Preview** in Google Cloud (no SLA, and Google recommends a load balancer for production,
+   which would cost money, so we do not use one). Mappings are free; Google issues and renews the certificate.
+2. A Cloudflare CNAME `<host>` to `ghs.googlehosted.com` (taken from the mapping's `resource_records`), DNS only
+   (`proxied = false`): Google must see its own host to issue the certificate.
+
+**One-time, by hand:** the domain must be verified in Google Search Console (Domain property `breakthruventures.ai`,
+TXT record at the apex, kept hand-managed in Cloudflare) and `gh-30apps-deploy@<project>.iam.gserviceaccount.com`
+added as an **Owner** there, because Cloud Run requires the caller to be a verified owner. This covers every
+subdomain, so it is done once.
+
+**Certificate and `APP_URL`.** The certificate takes 15 minutes to 24 hours after the CNAME exists. Until then
+`APP_URL` stays the run.app URL, so sign-in never breaks (the app checks the Origin against `APP_URL`).
+Terraform switches `APP_URL` to `https://<domain>` only when the mapping's `Ready` condition is `True` in state:
+rerun the workflow (**Actions, Terraform, Run workflow** on `main`) after the certificate is issued, and the refresh
+sees it and updates the service. The `custom_domain_ready` output shows which apps have switched. The mapping names
+the service as a plain string, so it never depends on the service (which reads the mapping's status): no cycle.
+The service reads the mapping's status, so Terraform always creates the mapping before it creates or updates the service, and the mapping's service must already exist. Add a new app with `domain: null` first, and set `domain` in a later PR once its service is deployed.
+If `Ready` is briefly not `True` (for example during certificate renewal), the next apply flips `APP_URL` back to the run.app URL until it is ready again.
+
+An app's upload bucket (`storage: true`) allows CORS from the custom origin as well as run.app, from the first apply,
+only for apps that have a `domain`. The `urls` output stays on run.app (the health check uses it);
+`custom_urls` lists the custom ones. The pull-request plan uses a dummy token with `-refresh=false`, so it lists the
+mapping and CNAME an apply would create without calling Cloudflare or Google's domain API. Without the real token an
+apply fails at the plan stage with the guard's message.
 
 **Default URLs** until an app gets a custom domain: Azure `https://app-<name>.<env>.eastus.azurecontainerapps.io`,
 Google Cloud `https://<name>-<project-number>.us-central1.run.app`, Oracle `https://<name>.<ip-with-dashes>.sslip.io`,

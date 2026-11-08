@@ -5,7 +5,7 @@
 #   clouds  any of: aws, azure, gcp, oci
 #   image   GitHub Container Registry image published by the app repo's publish workflow
 #   tag     an immutable sha-<commit> tag (never "latest", so deploys are repeatable)
-#   domain  custom domain under breakthruventures.ai; DNS records are created in Cloudflare on deploy (AWS, Azure, Oracle; see README). null = cloud default URL
+#   domain  custom domain under breakthruventures.ai; DNS records are created in Cloudflare on deploy (AWS, Azure, Google Cloud, Oracle; see README). null = cloud default URL
 #   ai      "demo" (recorded answers) or "gemini"
 #   storage optional, true = a private upload bucket for the app (Google Cloud only; other clouds ignore it). See README "Object storage (Google Cloud)"
 #   secrets optional list of secret env var NAMES (never values); see README "Per-app secrets"
