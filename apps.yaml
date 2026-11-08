@@ -31,3 +31,11 @@ apps:
     tag: sha-fb16222
     domain: app2.breakthruventures.ai
     ai: gemini
+  - name: expense-tracker
+    title: Expense Tracker
+    clouds: [gcp]
+    image: ghcr.io/breakthrudevelopment/03-expense-tracker
+    tag: sha-e0b749e
+    domain: null
+    ai: gemini
+    storage: true
