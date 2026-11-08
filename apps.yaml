@@ -23,3 +23,10 @@ apps:
     domain: app1.breakthruventures.ai
     ai: gemini
     secrets: [GITHUB_WEBHOOK_SECRET, INGEST_TOKEN, SYNC_TOKEN]
+  - name: notes-kb
+    title: Notes and Knowledge Base
+    clouds: [azure]
+    image: ghcr.io/breakthrudevelopment/02-notes-kb
+    tag: sha-928f27a
+    domain: null
+    ai: gemini
