@@ -61,8 +61,8 @@ jobs:
       # Pull requests get no Cloudflare token (a PR branch could print it). To still show the DNS records
       # a plan would create, manage_dns is on with a dummy token, and the plan skips the refresh so it
       # never calls Cloudflare: new records are just planned, none are read or changed.
-      TF_VAR_manage_dns: ${{ vars.CLOUDFLARE_ZONE_ID != '' }}
-      TF_VAR_cloudflare_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID }}
+      TF_VAR_manage_dns: "true"
+      TF_VAR_cloudflare_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID || 'plan-only-zone-id-not-used' }}
       CLOUDFLARE_API_TOKEN: "unused_plan_only_no_dns_calls_00000000000"
     defaults:
       run:

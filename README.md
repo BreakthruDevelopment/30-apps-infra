@@ -125,7 +125,7 @@ read -rsp "Token: " V && echo && aws ssm put-parameter --region us-east-2 --name
 **Zone ID.** A DNS:Edit-only token cannot look the zone up by name (that needs Zone:Read). Give Terraform the zone
 ID instead (not secret; Cloudflare, `breakthruventures.ai`, Overview, API section, Zone ID):
 AWS: `aws ssm put-parameter --region us-east-2 --name /30apps/cloudflare/zone_id --type String --overwrite --value <zone id>`;
-GitHub: repository variable `CLOUDFLARE_ZONE_ID` (the Azure pull-request plan reads it too). If it is not set, Terraform looks the zone up by name, which works
+GitHub: repository variable `CLOUDFLARE_ZONE_ID`. If it is not set, Terraform looks the zone up by name, which works
 only if the token also has Zone / Zone / Read.
 
 Pull-request plans never get the token (a PR branch could print it). Terraform only uses Cloudflare when
