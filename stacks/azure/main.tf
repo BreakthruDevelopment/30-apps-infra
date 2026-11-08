@@ -146,7 +146,7 @@ resource "random_password" "auth" {
 #   2. azurerm_container_app_custom_domain: adds the hostname with binding Disabled. Azure checks the
 #      records above, and a managed certificate can only be requested for a hostname the app already has.
 #   3. azapi managed certificate (free, CNAME validation).
-#   4. azapi_update_resource: PATCH the app's ingress so the hostname uses the certificate (SniEnabled).
+#   4. azapi_resource_action (HTTP PATCH): the app's ingress so the hostname uses the certificate (SniEnabled).
 # Without manage_dns (no Cloudflare token) step 1 is skipped: the plan still works, but an apply would fail
 # at step 2 until the records exist, so CI always passes the token on apply.
 
@@ -217,7 +217,7 @@ resource "azurerm_container_app_custom_domain" "app" {
   name             = each.value
   container_app_id = azurerm_container_app.app[each.key].id
 
-  # The certificate and binding type are set by azapi_update_resource.binding below; without this
+  # The certificate and binding type are set by azapi_resource_action.binding below; without this
   # every plan would try to recreate the domain.
   lifecycle {
     ignore_changes = [certificate_binding_type, container_app_environment_certificate_id]
@@ -245,12 +245,16 @@ resource "azapi_resource" "managed_cert" {
   depends_on = [azurerm_container_app_custom_domain.app]
 }
 
-# Switch the hostname from Disabled to SniEnabled with the certificate. A PATCH leaves the rest of the
-# app untouched; later azurerm updates (new image tag) read the app first, so they keep this binding.
-resource "azapi_update_resource" "binding" {
+# Switch the hostname from Disabled to SniEnabled with the certificate, with a real HTTP PATCH (merge):
+# only ingress.customDomains is sent, so the app's secrets and everything else stay as they are.
+# (azapi_update_resource can't be used here: it GETs the app and PUTs it back, and a GET never returns
+# secret values, so Azure rejects the PUT with ContainerAppSecretInvalid.) Re-runs only when the
+# hostname or certificate changes; later azurerm updates (new image tag) read the app first and keep it.
+resource "azapi_resource_action" "binding" {
   for_each    = local.domain_apps
   type        = "Microsoft.App/containerApps@2024-03-01"
   resource_id = azurerm_container_app.app[each.key].id
+  method      = "PATCH"
   body = {
     properties = {
       configuration = {
@@ -264,6 +268,8 @@ resource "azapi_update_resource" "binding" {
       }
     }
   }
+
+  depends_on = [azurerm_container_app_custom_domain.app]
 }
 
 locals {

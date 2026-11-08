@@ -188,7 +188,7 @@ An Azure app with a `domain` gets, in one apply on merge to `main` (needs the `C
    from step 1; a managed certificate can only be requested for a hostname the app already has).
 3. A free Azure managed certificate (`azapi_resource`, `Microsoft.App/managedEnvironments/managedCertificates`,
    CNAME validation; azurerm cannot create one). The apply waits until it is issued, usually a few minutes.
-4. `azapi_update_resource` patches the app's ingress to bind the hostname to the certificate (`SniEnabled`).
+4. `azapi_resource_action` sends an HTTP PATCH of only the app's ingress, binding the hostname to the certificate (`SniEnabled`). (A GET + PUT would fail: Azure never returns secret values.)
 
 The custom domain resource ignores changes to its certificate and binding type (azapi owns them), so a second
 apply plans no changes, and a new image tag keeps the binding. The deploy identity needs nothing new: Contributor on
