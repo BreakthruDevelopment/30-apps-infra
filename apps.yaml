@@ -27,6 +27,6 @@ apps:
     title: Notes and Knowledge Base
     clouds: [azure]
     image: ghcr.io/breakthrudevelopment/02-notes-kb
-    tag: sha-928f27a
+    tag: sha-fb16222
     domain: null
     ai: gemini
