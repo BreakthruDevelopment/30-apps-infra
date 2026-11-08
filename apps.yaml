@@ -20,7 +20,7 @@ apps:
     title: Portfolio Build Tracker
     clouds: [aws]
     image: ghcr.io/breakthrudevelopment/01-build-tracker
-    tag: sha-225e788
+    tag: sha-03cfd43
     domain: app1.breakthruventures.ai
     ai: gemini
     secrets: [GITHUB_WEBHOOK_SECRET, INGEST_TOKEN, SYNC_TOKEN]
@@ -28,14 +28,14 @@ apps:
     title: Notes and Knowledge Base
     clouds: [azure]
     image: ghcr.io/breakthrudevelopment/02-notes-kb
-    tag: sha-fb16222
+    tag: sha-6675f0b
     domain: app2.breakthruventures.ai
     ai: gemini
   - name: expense-tracker
     title: Expense Tracker
     clouds: [gcp]
     image: ghcr.io/breakthrudevelopment/03-expense-tracker
-    tag: sha-3dc6006
+    tag: sha-811aac4
     domain: app3.breakthruventures.ai
     ai: gemini
     storage: true
