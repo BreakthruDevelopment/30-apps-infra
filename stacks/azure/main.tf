@@ -4,9 +4,17 @@
 terraform {
   required_version = ">= 1.12"
   required_providers {
+    azapi = {
+      source  = "Azure/azapi"
+      version = "~> 2.4"
+    }
     azurerm = {
       source  = "hashicorp/azurerm"
       version = ">= 4.20, < 5.0"
+    }
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = "~> 5.0"
     }
     random = {
       source  = "hashicorp/random"
@@ -22,6 +30,21 @@ provider "azurerm" {
   subscription_id = var.subscription_id
   # The bootstrap registered the providers this stack needs; don't try to register all of them.
   resource_provider_registrations = "none"
+}
+
+# azapi creates what azurerm cannot: the managed certificate and the SNI binding of a custom domain.
+# It signs in like azurerm (ARM_* environment variables, OIDC in CI).
+provider "azapi" {
+  subscription_id = var.subscription_id
+  # The bootstrap registered the providers this stack needs.
+  skip_provider_registration = true
+}
+
+# DNS lives in Cloudflare. Only used when var.manage_dns is true (CI sets it when the
+# CLOUDFLARE_API_TOKEN secret exists). Otherwise no cloudflare resource exists, so the placeholder is
+# never sent anywhere. The real token comes from the CLOUDFLARE_API_TOKEN environment variable.
+provider "cloudflare" {
+  api_token = var.manage_dns ? null : "unused_dns_not_managed_00000000000000000" # 40 characters: the provider validates the format even when unused
 }
 
 locals {
@@ -117,21 +140,137 @@ resource "random_password" "auth" {
   special  = false
 }
 
-# Custom domains are not wired up on azure yet. Fail the plan loudly instead of promising a URL
-# (APP_URL) whose DNS and certificate nobody creates. TODO: see README "Custom domains".
-# Azure Container Apps (needs a CNAME, an asuid TXT record and a managed certificate).
-resource "terraform_data" "domain_unsupported" {
-  for_each = { for name, a in local.apps : name => a.domain if try(a.domain, null) != null }
+# --- Custom domains (Cloudflare DNS + Azure managed certificate) -------------------------------
+# For an app with a domain, one apply does, in this order:
+#   1. Cloudflare: CNAME <domain> -> the app's default FQDN and TXT asuid.<domain> (DNS only).
+#   2. azurerm_container_app_custom_domain: adds the hostname with binding Disabled. Azure checks the
+#      records above, and a managed certificate can only be requested for a hostname the app already has.
+#   3. azapi managed certificate (free, CNAME validation).
+#   4. azapi_update_resource: PATCH the app's ingress so the hostname uses the certificate (SniEnabled).
+# Without manage_dns (no Cloudflare token) step 1 is skipped: the plan still works, but an apply would fail
+# at step 2 until the records exist, so CI always passes the token on apply.
+
+locals {
+  domain_apps = { for name, a in local.apps : name => a.domain if try(a.domain, null) != null }
+  # DNS records Terraform owns: only apps on azure in apps.yaml with a domain, and only with manage_dns.
+  dns_apps = var.manage_dns ? local.domain_apps : {}
+  zone_id  = var.cloudflare_zone_id != "" ? var.cloudflare_zone_id : try(data.cloudflare_zone.main[0].id, "")
+}
+
+data "cloudflare_zone" "main" {
+  count = var.manage_dns && var.cloudflare_zone_id == "" ? 1 : 0
+  # Needs Zone:Read on the token. With a DNS:Edit-only token set cloudflare_zone_id instead.
+  filter = {
+    name = var.dns_zone
+  }
+}
+
+# Guard: Terraform may only create records under the app subdomains it is given; never the apex,
+# mail, website or other existing names, and it never manages the zone itself.
+resource "terraform_data" "dns_guard" {
+  for_each = local.domain_apps
   input    = each.value
   lifecycle {
     precondition {
-      condition     = each.value == null
-      error_message = "App ${each.key} sets domain ${each.value}, but custom domains are not supported on azure yet. Set domain: null for this cloud (see README, Custom domains)."
+      condition     = endswith(each.value, ".${var.dns_zone}") && !contains(var.reserved_hosts, trimsuffix(each.value, ".${var.dns_zone}")) && !startswith(each.value, "_")
+      error_message = "App ${each.key}: domain ${each.value} must be a subdomain of ${var.dns_zone} that is not a reserved name (${join(", ", var.reserved_hosts)})."
+    }
+  }
+}
+
+check "dns_managed" {
+  assert {
+    condition     = var.manage_dns || length(local.domain_apps) == 0
+    error_message = "manage_dns is false (no Cloudflare token), so the DNS records for ${join(", ", values(local.domain_apps))} are not planned. An apply without the token fails when Azure cannot find them."
+  }
+}
+
+resource "cloudflare_dns_record" "cname" {
+  for_each = local.dns_apps
+  zone_id  = local.zone_id
+  name     = each.value
+  type     = "CNAME"
+  content  = azurerm_container_app.app[each.key].ingress[0].fqdn
+  ttl      = 1
+  proxied  = false
+  comment  = "30-apps-infra: ${each.key} on Azure Container Apps"
+
+  depends_on = [terraform_data.dns_guard]
+}
+
+# Proves to Azure that we own the domain. Quoted because Cloudflare stores TXT content with its quotes.
+resource "cloudflare_dns_record" "asuid" {
+  for_each = local.dns_apps
+  zone_id  = local.zone_id
+  name     = "asuid.${each.value}"
+  type     = "TXT"
+  content  = "\"${azurerm_container_app_environment.main.custom_domain_verification_id}\""
+  ttl      = 1
+  proxied  = false
+  comment  = "30-apps-infra: ${each.key} Azure domain verification"
+
+  depends_on = [terraform_data.dns_guard]
+}
+
+resource "azurerm_container_app_custom_domain" "app" {
+  for_each         = local.domain_apps
+  name             = each.value
+  container_app_id = azurerm_container_app.app[each.key].id
+
+  # The certificate and binding type are set by azapi_update_resource.binding below; without this
+  # every plan would try to recreate the domain.
+  lifecycle {
+    ignore_changes = [certificate_binding_type, container_app_environment_certificate_id]
+  }
+
+  depends_on = [terraform_data.dns_guard, cloudflare_dns_record.cname, cloudflare_dns_record.asuid]
+}
+
+# Free Azure managed certificate. Created only after the hostname is on the app; validation follows
+# the CNAME above. The create call returns once the certificate is issued.
+resource "azapi_resource" "managed_cert" {
+  for_each  = local.domain_apps
+  type      = "Microsoft.App/managedEnvironments/managedCertificates@2024-03-01"
+  name      = "cert-${each.key}"
+  parent_id = azurerm_container_app_environment.main.id
+  location  = azurerm_container_app_environment.main.location
+  tags      = local.tags
+  body = {
+    properties = {
+      subjectName             = each.value
+      domainControlValidation = "CNAME"
+    }
+  }
+
+  depends_on = [azurerm_container_app_custom_domain.app]
+}
+
+# Switch the hostname from Disabled to SniEnabled with the certificate. A PATCH leaves the rest of the
+# app untouched; later azurerm updates (new image tag) read the app first, so they keep this binding.
+resource "azapi_update_resource" "binding" {
+  for_each    = local.domain_apps
+  type        = "Microsoft.App/containerApps@2024-03-01"
+  resource_id = azurerm_container_app.app[each.key].id
+  body = {
+    properties = {
+      configuration = {
+        ingress = {
+          customDomains = [{
+            name          = each.value
+            bindingType   = "SniEnabled"
+            certificateId = azapi_resource.managed_cert[each.key].id
+          }]
+        }
+      }
     }
   }
 }
 
 locals {
+  # APP_URL is what the app uses for sign-in cookies and origin checks. It is part of the container app
+  # itself, which the domain resources depend on, so Terraform cannot wait for the binding: the app
+  # gets the new URL in the same apply, a few minutes before the certificate is bound. The default URL
+  # keeps serving throughout; only sign-in on it fails during that window.
   app_url = {
     for name, a in local.apps : name => (
       try(a.domain, null) != null

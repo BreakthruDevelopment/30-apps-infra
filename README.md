@@ -116,7 +116,7 @@ Create one API token at Cloudflare: My Profile, API Tokens, Create Token, Custom
 | Where | Name | Used by |
 | --- | --- | --- |
 | AWS Parameter Store, SecureString | `/30apps/cloudflare/api_token` | `deploy/aws.sh` (exports `CLOUDFLARE_API_TOKEN`; never printed) |
-| GitHub, Settings, Environments, `production`, secret | `CLOUDFLARE_API_TOKEN` | the Oracle apply step only (passed explicitly, not the whole `secrets` context) |
+| GitHub, Settings, Environments, `production`, secret | `CLOUDFLARE_API_TOKEN` | the Azure and Oracle apply steps only (passed explicitly, not the whole `secrets` context) |
 
 ```
 read -rsp "Token: " V && echo && aws ssm put-parameter --region us-east-2 --name /30apps/cloudflare/api_token --type SecureString --overwrite --value "$V" --query Version --output text; unset V
@@ -125,12 +125,14 @@ read -rsp "Token: " V && echo && aws ssm put-parameter --region us-east-2 --name
 **Zone ID.** A DNS:Edit-only token cannot look the zone up by name (that needs Zone:Read). Give Terraform the zone
 ID instead (not secret; Cloudflare, `breakthruventures.ai`, Overview, API section, Zone ID):
 AWS: `aws ssm put-parameter --region us-east-2 --name /30apps/cloudflare/zone_id --type String --overwrite --value <zone id>`;
-GitHub: repository variable `CLOUDFLARE_ZONE_ID`. If it is not set, Terraform looks the zone up by name, which works
+GitHub: repository variable `CLOUDFLARE_ZONE_ID` (the Azure pull-request plan reads it too). If it is not set, Terraform looks the zone up by name, which works
 only if the token also has Zone / Zone / Read.
 
-Pull-request plans have no token and need none: Terraform only uses Cloudflare when `manage_dns` is true
-(`deploy/aws.sh` sets it when the SSM token exists; the Oracle apply sets it when the secret exists), and
-with it false no Cloudflare resource or lookup exists. Don't switch `manage_dns` back to false after records
+Pull-request plans never get the token (a PR branch could print it). Terraform only uses Cloudflare when
+`manage_dns` is true (`deploy/aws.sh` sets it when the SSM token exists; the Azure and Oracle applies set it when
+the secret exists), and with it false no Cloudflare resource or lookup exists. The Azure PR plan sets `manage_dns`
+with a dummy token and skips the refresh (`-refresh=false`), so it lists the records an apply would create without
+calling Cloudflare. Don't switch `manage_dns` back to false after records
 were created: Terraform would plan to delete them and fail without a token. Remove an app's `domain` instead.
 
 ### AWS
@@ -176,12 +178,32 @@ dynamic parameter, so applying it needs no server restart. Extensions that need 
 different, static parameter and are not covered here. Confirm the installed pgvector version with
 `SELECT default_version FROM pg_available_extensions WHERE name = 'vector'` (needs the live server).
 
-### Azure and Google Cloud (not supported yet)
+### Azure
 
-TODO. Custom domains on these clouds need more than a DNS record (Azure Container Apps: CNAME, `asuid` TXT and a
-managed certificate that has to exist before the domain binds; Cloud Run: a domain mapping and Google domain
-verification), so they are not wired up. To avoid a promised URL with no DNS behind it, the plan **fails with an
-explicit error** if an app on `azure` or `gcp` sets `domain`. Leave `domain: null` there. No current app needs it.
+An Azure app with a `domain` gets, in one apply on merge to `main` (needs the `CLOUDFLARE_API_TOKEN` secret):
+
+1. Cloudflare CNAME `<host>` to the container app's default hostname, and TXT `asuid.<host>` with the
+   environment's domain verification ID (both DNS only).
+2. `azurerm_container_app_custom_domain`, which adds the hostname with binding `Disabled` (Azure checks the records
+   from step 1; a managed certificate can only be requested for a hostname the app already has).
+3. A free Azure managed certificate (`azapi_resource`, `Microsoft.App/managedEnvironments/managedCertificates`,
+   CNAME validation; azurerm cannot create one). The apply waits until it is issued, usually a few minutes.
+4. `azapi_update_resource` patches the app's ingress to bind the hostname to the certificate (`SniEnabled`).
+
+The custom domain resource ignores changes to its certificate and binding type (azapi owns them), so a second
+apply plans no changes, and a new image tag keeps the binding. The deploy identity needs nothing new: Contributor on
+the subscription covers managed certificates.
+
+`APP_URL` becomes `https://<domain>` in the same apply. The app resource cannot wait for the binding that
+depends on it, so for the few minutes before the certificate is bound, sign-in on the default URL fails (its Origin
+check expects the custom URL); the default URL still serves pages. Without the token the plan still works and
+warns that the DNS records are not planned; an apply would fail at step 2, so keep the secret set.
+
+### Google Cloud (not supported yet)
+
+TODO. Cloud Run custom domains need a domain mapping and Google domain verification, so they are not wired up. To avoid
+a promised URL with no DNS behind it, the plan **fails with an explicit error** if an app on `gcp` sets `domain`.
+Leave `domain: null` there. No current app needs it.
 
 **Default URLs** until an app gets a custom domain: Azure `https://app-<name>.<env>.eastus.azurecontainerapps.io`,
 Google Cloud `https://<name>-<project-number>.us-central1.run.app`, Oracle `https://<name>.<ip-with-dashes>.sslip.io`,
