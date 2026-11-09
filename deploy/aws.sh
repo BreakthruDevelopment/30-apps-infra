@@ -250,7 +250,7 @@ collect_app_secrets() {
     ($p.Name | ltrimstr("/30apps/") | split("/")) as [$a, $v] | .[$a][$v] = $p.Value)' "$tmp"/batch-*.json)"
   export TF_VAR_app_secrets
   found="$(jq -r 'to_entries[] | .key as $a | .value | keys[] | "/30apps/\($a)/\(.)"' <<<"$TF_VAR_app_secrets")"
-  missing="$(jq -r '.[] | .name as $n | (.secrets // [])[] | "/30apps/\($n)/\(.)"' <<<"$AWS_APPS" | grep -vxF -f <(printf '%s\n' "$found") || true)"
+  missing="$(jq -r '.[] | .name as $n | (.secrets // [])[] | "/30apps/\($n)/\(.)"' <<<"$AWS_APPS" | FOUND="$found" awk 'BEGIN { n = split(ENVIRON["FOUND"], f, "\n"); for (i = 1; i <= n; i++) if (f[i] != "") seen[f[i]] = 1 } !($0 in seen)' || true)"
   if [ -n "$missing" ]; then
     while read -r m; do echo "==> WARNING: no app secret at ${m}; skipping it"; done <<<"$missing"
   fi
@@ -325,11 +325,13 @@ guarded_apply
 
 echo "==> Checking each app"
 # Read the outputs first: failures inside a process substitution or an argument would be silently ignored.
+# No process substitution (<(...)) anywhere in this script: Lambda has no /dev/fd, so the deployer can't run it.
 urls_json="$(terraform output -json urls)"
 dns_json="$(terraform output -json dns_records)"
 unhealthy=""
 health_deadline=$((SECONDS + ${HEALTH_WAIT_SECONDS:-0}))
 while read -r name url; do
+  [ -n "$name" ] || continue  # an empty here-string still yields one empty line
   while :; do
     status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "${url}/api/health" || true)"
     if [ "$status" = "200" ] || [ "$SECONDS" -ge "$health_deadline" ]; then break; fi
@@ -337,7 +339,7 @@ while read -r name url; do
   done
   echo "    ${name}: ${url}  (health: HTTP ${status})"
   if [ "$status" != "200" ]; then unhealthy="${unhealthy}${unhealthy:+, }${name} (HTTP ${status})"; fi
-done < <(jq -r 'to_entries[] | "\(.key) \(.value)"' <<<"$urls_json")
+done <<<"$(jq -r 'to_entries[] | "\(.key) \(.value)"' <<<"$urls_json")"
 print_dns_records "$dns_json"
 if [ -n "$unhealthy" ] && [ "${DEPLOY_STRICT_HEALTH:-}" = "1" ]; then
   echo "==> ERROR: unhealthy after the deploy: ${unhealthy}"
