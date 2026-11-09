@@ -39,3 +39,10 @@ apps:
     domain: app3.breakthruventures.ai
     ai: gemini
     storage: true
+  - name: habit-tracker
+    title: Habit and Goal Tracker
+    clouds: [oci]
+    image: ghcr.io/breakthrudevelopment/04-habit-tracker
+    tag: sha-f531909
+    domain: app4.breakthruventures.ai
+    ai: gemini
