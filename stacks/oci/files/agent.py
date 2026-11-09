@@ -200,8 +200,11 @@ def main():
     run(COMPOSE + ["up", "-d", "--remove-orphans"])
     for name in created:  # a fresh database: restart so the app migrates into it
         run(COMPOSE + ["restart", f"app-{name}"])
-    if caddy_changed and not compose_changed:
-        run(COMPOSE + ["exec", "-T", "caddy", "caddy", "reload", "--config", "/etc/caddy/Caddyfile"], check=False)
+    # Always reload: `up -d` doesn't recreate Caddy when only the mounted Caddyfile changed, and a run that wrote
+    # the Caddyfile but failed later would otherwise never reload it. Reloading an unchanged config is a no-op.
+    reload = run(COMPOSE + ["exec", "-T", "caddy", "caddy", "reload", "--config", "/etc/caddy/Caddyfile"], check=False)
+    if reload.returncode != 0:
+        log("caddy.reload_failed", code=reload.returncode)
 
     log("synced", apps=[a["name"] for a in apps], ip=ip, compose_changed=compose_changed, caddy_changed=caddy_changed)
     return 0
