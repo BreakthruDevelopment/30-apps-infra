@@ -1,4 +1,4 @@
-# The Build Tracker's half-hourly sync (catalog refresh and health checks), run by Cloud Scheduler.
+# The Build Tracker's sync (catalog refresh and health checks), run by Cloud Scheduler.
 # GitHub's scheduled workflows were delayed by 3–5 hours, which left the tracker's board stale.
 # One job: Cloud Scheduler's free tier is 3 jobs per billing account. The daily summaries stay on the GitHub
 # workflow in ai-dev-os, where a delay doesn't matter.
@@ -32,10 +32,11 @@ resource "google_project_service" "cloudscheduler" {
 resource "google_cloud_scheduler_job" "tracker_sync" {
   count       = local.tracker_scheduler
   name        = "build-tracker-sync"
-  description = "POST /api/sync on the Build Tracker every 30 minutes"
+  description = "POST /api/sync on the Build Tracker in pairs, twice an hour"
   region      = var.region
-  # Minutes avoid :00, when schedulers are busiest; the same minutes the GitHub workflow used.
-  schedule         = "17,47 * * * *"
+  # Pairs two minutes apart: the first call wakes scale-to-zero apps (Azure, Cloud Run), the second confirms.
+  # The tracker marks an app down only after two failures within 10 minutes. Minutes avoid :00.
+  schedule         = "15,17,45,47 * * * *"
   time_zone        = "Etc/UTC"
   attempt_deadline = "60s"
 
