@@ -171,6 +171,7 @@ jobs:
       TF_VAR_project_number: ${{ vars.GCP_PROJECT_NUMBER }}
       TF_VAR_region: ${{ vars.GCP_REGION }}
       TF_VAR_gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+      TF_VAR_tracker_sync_token: ${{ secrets.TRACKER_SYNC_TOKEN }}
     defaults:
       run:
         working-directory: stacks/gcp
