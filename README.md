@@ -21,6 +21,7 @@ tokens (no stored keys on AWS, Azure or Google Cloud; a narrowly scoped key on O
 | Cloud | Shell | Command |
 | --- | --- | --- |
 | AWS | CloudShell | `curl -fsSL https://raw.githubusercontent.com/BreakthruDevelopment/30-apps-infra/main/bootstrap/aws.sh \| bash` |
+| AWS, automatic deploys (after the first CloudShell deploy; see [below](#aws-automatic-deploys)) | CloudShell | `curl -fsSL https://raw.githubusercontent.com/BreakthruDevelopment/30-apps-infra/main/bootstrap/aws-autodeploy.sh \| bash` |
 | Azure | Cloud Shell (Bash) | `curl -fsSL https://raw.githubusercontent.com/BreakthruDevelopment/30-apps-infra/main/bootstrap/azure.sh \| bash` |
 | Google Cloud | Cloud Shell | `curl -fsSL https://raw.githubusercontent.com/BreakthruDevelopment/30-apps-infra/main/bootstrap/gcp.sh \| bash -s -- YOUR_PROJECT_ID` |
 | Oracle Cloud | Cloud Shell | `curl -fsSL https://raw.githubusercontent.com/BreakthruDevelopment/30-apps-infra/main/bootstrap/oci.sh \| bash` |
@@ -36,15 +37,80 @@ Each script is safe to rerun, prints exactly what it created, and creates nothin
 | Azure | Container Apps (always-free grant) | Flexible Server B1ms (free 12 months) | GitHub Actions on merge to `main` |
 | Google Cloud | Cloud Run in us-central1 (always-free) | Postgres on the always-free e2-micro, private network only | GitHub Actions on merge to `main` |
 | Oracle Cloud | Docker + Caddy on the Always Free Ampere VM | Postgres on the same VM | GitHub Actions builds the VM once; an agent on the VM syncs with `apps.yaml` every 2 minutes |
-| AWS | Lambda + API Gateway (us-east-2) | RDS db.t4g.micro (from Free plan credits) | One command in AWS CloudShell, below |
+| AWS | Lambda + API Gateway (us-east-2) | RDS db.t4g.micro (from Free plan credits) | A deployer Lambda inside the account pulls `main` every 10 minutes and deploys it ([AWS: automatic deploys](#aws-automatic-deploys)); one command in AWS CloudShell is the fallback |
 
 Every app is capped at one instance (`max_instances = 1`) so nothing grows past a free limit.
 
-**AWS** (this account's guardrails block GitHub sign-in, and the Free plan is kept so it can never bill):
+**AWS** (this account's guardrails block GitHub sign-in, and the Free plan is kept so it can never bill).
+Once automatic deploys are set up ([below](#aws-automatic-deploys)), merging to `main` deploys AWS by itself within
+about 10 minutes. The manual fallback, which always works, in AWS CloudShell:
 
 ```
 curl -fsSL https://raw.githubusercontent.com/BreakthruDevelopment/30-apps-infra/main/deploy/aws.sh | bash
 ```
+
+### AWS: automatic deploys
+
+GitHub can't sign in to this AWS account, so instead of GitHub pushing, something inside AWS **pulls** (the same
+idea as the Oracle VM's agent). Nothing in GitHub holds an AWS credential, and this repo being public is no risk.
+
+```
+EventBridge Scheduler (every 10 min) -> Lambda "apps30-deployer" (arm64 container image from ECR, 2 GB, 15 min)
+  1. GitHub: what commit is main?  (read-only REST call, no sign-in)      same as /30apps/deployer/last_sha? stop.
+  2. download that exact commit's tarball (by SHA), run ITS deploy/aws.sh  <- the same script CloudShell runs
+  3. success: write last_sha.  Always: write last_result (JSON).           logs: CloudWatch, JSON lines
+```
+
+- **The deploy logic lives in this repo** (`deploy/aws.sh`), so a fix merged to `main` reaches AWS with no rebuild.
+  The image (`deploy/lambda/`) only holds the tools (Terraform, crane, yq, AWS CLI), the Terraform providers
+  (a filesystem mirror, so Lambda's small `/tmp` is enough) and the ~200-line runner `deploy/lambda/deployer.sh`.
+  It is built by the **AWS deployer image** workflow and pushed to `ghcr.io/breakthrudevelopment/30apps-deployer`
+  (public) only on `main`; pull requests build and smoke-test it without pushing. Lambda can only run ECR images, so
+  the bootstrap copies it into ECR with crane.
+- **What triggers a deploy:** any new commit on `main` (not only `apps.yaml`; a no-op Terraform run is harmless). A run
+  that is already in progress is never overlapped: a Parameter Store lock (and reserved concurrency 1 where the account
+  allows it). `deploy/aws.sh` takes the same lock when you run it in CloudShell. A commit that fails is retried at most
+  3 times, 25+ minutes apart, then left alone until a new commit or a forced run, so a broken commit can't burn compute.
+- **Where results are:** `aws ssm get-parameter --name /30apps/deployer/last_result` (sha, ok, time, message), or run
+  `... | bash -s -- status`. The `urls`, health checks and DNS records print into the CloudWatch log group
+  `/aws/lambda/apps30-deployer` (14 days). Terraform masks sensitive values and nothing prints a secret; secrets still
+  live only in Parameter Store (`/30apps/...`, read by `deploy/aws.sh`) exactly as before.
+- **IAM:** the function's role `apps30-deployer` has one inline policy scoped to this stack (state bucket, `30apps-*`
+  Lambda/ECR/log names, API Gateway, RDS, security groups, ACM, Parameter Store `/30apps/*`, and IAM only for the one
+  role `30apps-lambda` and only to attach the basic logging policy). It can't touch its own role or function. It is
+  written in `bootstrap/aws-autodeploy.sh` (`write_policy`). If the policy ever misses an action, the deploy log shows the
+  `AccessDenied`; `DEPLOYER_BROAD=1` on a bootstrap rerun adds the AWS-managed `PowerUserAccess` (what the old GitHub deploy
+  role had).
+- **Cost:** all within free tiers. Scheduler: ~4,300 invocations a month (14,000,000 free). Lambda: a no-change check is
+  ~2 s at 2 GB (~4 GB-s, ~17,000 GB-s a month) and a typical deploy 3 to 8 minutes (~400 to 1,000 GB-s); 400,000 GB-s
+  and 1,000,000 requests are free every month. The worst case, a commit that keeps failing, is capped at 3 runs of 15
+  minutes (5,400 GB-s). ECR storage (~0.4 GB, two images kept) and CloudWatch Logs are negligible and come from Free plan
+  credits like the rest.
+
+**One-time setup**, after the first successful CloudShell deploy and once the *AWS deployer image* workflow has run on
+`main`: (1) GitHub, Packages, `30apps-deployer`, Package settings, change visibility to **Public** (Lambda can only pull
+through ECR, and the bootstrap copies it without credentials); (2) in AWS CloudShell:
+
+```
+curl -fsSL https://raw.githubusercontent.com/BreakthruDevelopment/30-apps-infra/main/bootstrap/aws-autodeploy.sh | bash
+```
+
+It is safe to rerun. It creates the roles, ECR repository, function and schedule, deploys once and prints the result. If
+the account's guardrails refuse a step it says which and stops, leaving the CloudShell flow as it was. Afterwards, give
+the script a command with `bash -s -- <command>`:
+
+| Command | Does |
+| --- | --- |
+| *(none)* | Install or update. Rerun it to pick up a new deployer image (when `deploy/lambda/` or the provider constraints in `stacks/aws/main.tf` changed and the workflow pushed a new image) |
+| `pause` / `resume` | Stop or restart the schedule. While paused, use the CloudShell one-liner |
+| `deploy` | Deploy now even if `main` hasn't changed (also what to do after changing a Parameter Store secret), and print the result |
+| `status` | Schedule, last deployed commit and result, lock, whether `main` moved |
+| `remove` | Delete everything the script created (apps and Terraform state are untouched) |
+
+Terraform and its providers are fixed in the image (Terraform 1.12.x; providers as resolved from the version constraints
+in `stacks/aws/main.tf` when the image was built; the stack has no committed `.terraform.lock.hcl`). If a deploy fails with
+a provider version error after a CloudShell run upgraded the providers, rerun the bootstrap after the image workflow has
+rebuilt (run it from the Actions tab if `main.tf` didn't change).
 
 **Gemini key:** apps with `ai: gemini` get the key from the `GEMINI_API_KEY` secret in the `production`
 environment (Azure, Google Cloud) or from AWS Parameter Store (`/30apps/gemini_api_key`, read by `deploy/aws.sh`).
@@ -92,7 +158,8 @@ Environments → production**, then map that one secret explicitly in the cloud'
 Each secret is named one by one on purpose: handing the whole `secrets` context to a script would expose every
 production secret (and GitHub flags such workflows as possibly malicious).
 
-Changing a value takes effect on the next deploy (rerun `deploy/aws.sh` for AWS; merge to `main` for Azure and
+Changing a value takes effect on the next deploy (AWS: `bash -s -- deploy` of the autodeploy bootstrap, or rerun
+`deploy/aws.sh` in CloudShell, because the deployer only reacts to new commits; merge to `main` for Azure and
 Google Cloud once wired). Pull-request plans don't have the values, so a plan after secrets exist may show them as changing.
 Terraform state holds the values like it holds the database password, in each cloud's private state bucket.
 

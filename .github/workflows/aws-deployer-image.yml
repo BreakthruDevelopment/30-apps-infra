@@ -1,0 +1,102 @@
+name: AWS deployer image
+
+# Builds the image of the AWS "deployer" Lambda (deploy/lambda/, see README "AWS: automatic deploys").
+# Pull requests: build it and smoke-test it (tools run, the Terraform providers mirror satisfies stacks/aws,
+#   /tmp stays small); nothing is pushed and no registry login happens.
+# main: the same, then push ghcr.io/breakthrudevelopment/30apps-deployer (:latest and :sha-<7>).
+#   Michael reruns bootstrap/aws-autodeploy.sh in CloudShell to copy a new image into ECR; the package must be public.
+
+on:
+  pull_request:
+    paths:
+      - "deploy/lambda/**"
+      - "deploy/aws.sh"
+      - "bootstrap/aws-autodeploy.sh"
+      - "stacks/aws/main.tf"
+      - ".github/workflows/aws-deployer-image.yml"
+  push:
+    branches: [main]
+    paths:
+      - "deploy/lambda/**"
+      - "stacks/aws/main.tf"
+      - ".github/workflows/aws-deployer-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aws-deployer-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/breakthrudevelopment/30apps-deployer
+
+jobs:
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: shellcheck -x deploy/aws.sh bootstrap/aws-autodeploy.sh deploy/lambda/bootstrap deploy/lambda/deployer.sh
+
+  image:
+    name: Build and test the image
+    runs-on: ubuntu-24.04-arm # the image is arm64 (Graviton Lambda); public repositories get these runners free
+    permissions:
+      contents: read
+      packages: write # used only by the push step, which runs on main
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/lambda/Dockerfile
+          platforms: linux/arm64
+          load: true
+          push: false
+          # Lambda can't run an image index: no provenance or SBOM attestations next to the image.
+          provenance: false
+          sbom: false
+          tags: ${{ env.IMAGE }}:test
+      - name: Smoke test (read-only root, 512 MB /tmp, like Lambda)
+        run: |
+          docker run --rm --read-only --tmpfs /tmp:rw,exec,size=512m -v "$PWD:/repo:ro" \
+            --entrypoint bash "$IMAGE:test" -euxo pipefail -c '
+              terraform version
+              crane version
+              yq-go --version
+              aws --version
+              jq --version
+              command -v curl timeout sed grep tar
+              bash -n /var/runtime/bootstrap
+              bash -n /var/task/deployer.sh
+              # The mirror must satisfy the stack: init, validate, and see how much of /tmp it used.
+              export HOME=/tmp/home TF_DATA_DIR=/tmp/tfdata
+              mkdir -p /tmp/work/stacks /tmp/home
+              cp -r /repo/stacks/aws /tmp/work/stacks/aws
+              cp /repo/apps.yaml /tmp/work/apps.yaml
+              cd /tmp/work/stacks/aws
+              terraform init -backend=false -input=false
+              terraform validate
+              du -sm /tmp
+              ls -la /tmp/tfdata/providers/registry.terraform.io/*/*/*/
+            '
+      - name: Log in to GitHub Container Registry (main only)
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push the tested image (main only)
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        run: |
+          short="${GITHUB_SHA:0:7}"
+          docker tag "$IMAGE:test" "$IMAGE:latest"
+          docker tag "$IMAGE:test" "$IMAGE:sha-${short}"
+          docker push "$IMAGE:sha-${short}"
+          docker push "$IMAGE:latest"
+          echo "Pushed $IMAGE:sha-${short} and :latest. The package must be public (Packages, 30apps-deployer, Package settings)." >> "$GITHUB_STEP_SUMMARY"

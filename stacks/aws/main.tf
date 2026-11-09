@@ -1,6 +1,7 @@
 # AWS: each app runs on Lambda (the image includes the Lambda Web Adapter) behind an
 # API Gateway HTTP API, with one shared RDS Postgres. This account's guardrails block
-# GitHub's keyless sign-in, so this stack is applied from AWS CloudShell with deploy/aws.sh.
+# GitHub's keyless sign-in, so this stack is applied with deploy/aws.sh: automatically by the deployer Lambda
+# in the account (bootstrap/aws-autodeploy.sh) or by hand in AWS CloudShell.
 # Everything here is paid from the Free plan's credits; the Free plan can never bill a card.
 
 terraform {

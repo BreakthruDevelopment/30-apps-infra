@@ -1,16 +1,29 @@
 #!/usr/bin/env bash
-# Deploy every AWS app in apps.yaml. Run in AWS CloudShell (already signed in):
-#   curl -fsSL https://raw.githubusercontent.com/BreakthruDevelopment/30-apps-infra/main/deploy/aws.sh | bash
+# Deploy every AWS app in apps.yaml. Two ways to run it, same steps either way:
 #
-# Why CloudShell: this account's project guardrails block GitHub's keyless sign-in, and the
+#  1. Automatically: the "deployer" Lambda in the AWS account (set up once with
+#     bootstrap/aws-autodeploy.sh) checks every 10 minutes whether `main` changed, downloads that exact
+#     commit and runs this script from it with AWS_DEPLOY_SRC set. GitHub never signs in to AWS.
+#  2. By hand, in AWS CloudShell (already signed in), the fallback that always works:
+#       curl -fsSL https://raw.githubusercontent.com/BreakthruDevelopment/30-apps-infra/main/deploy/aws.sh | bash
+#
+# Why not GitHub Actions: this account's project guardrails block GitHub's keyless sign-in, and the
 # Free plan is kept so the account can never bill a card. Everything runs on its credits.
 #
-# Steps: install Terraform and crane if needed → get the latest infra code → create the image
-# repositories and database → copy each app image from GitHub's registry into ECR → apply the
-# rest → check each app's health endpoint. Safe to rerun; it only changes what's different.
+# Steps: install Terraform and crane if needed → get the latest infra code (CloudShell) or use the commit
+# the deployer fetched (AWS_DEPLOY_SRC) → create the image repositories and database → copy each app
+# image from GitHub's registry into ECR → apply the rest → check each app's health endpoint.
+# Safe to rerun; it only changes what's different.
+#
+# Environment (all optional; the deployer sets them, CloudShell needs none):
+#   AWS_DEPLOY_SRC         a checked-out copy of this repo to deploy instead of cloning main
+#   AWS_TARGET_REGION      region, default us-east-2 (the only one the guardrails allow)
+#   DEPLOY_LOCK_HELD=1     the caller already holds the /30apps/deployer/lock lock in Parameter Store
+#   HEALTH_WAIT_SECONDS    keep re-checking an unhealthy app for this long (default 0: check once)
+#   DEPLOY_STRICT_HEALTH=1 exit 3 if an app is still unhealthy after that (the deployer sets this)
 set -euo pipefail
 
-REGION="us-east-2"
+REGION="${AWS_TARGET_REGION:-us-east-2}"  # not AWS_REGION: CloudShell sets that to whatever region the console shows
 REPO_URL="https://github.com/BreakthruDevelopment/30-apps-infra"
 WORKDIR="$HOME/30-apps-infra"
 BIN="$HOME/.local/bin"
@@ -71,8 +84,11 @@ if ! command -v terraform >/dev/null 2>&1; then
 fi
 
 # mikefarah yq under its own path: a different tool called "yq" (a Python jq wrapper) may already be installed.
+# (The deployer image ships it as yq-go too.)
 YQ="$BIN/yq-go"
-if [ ! -x "$YQ" ]; then
+if command -v yq-go >/dev/null 2>&1; then
+  YQ="$(command -v yq-go)"
+elif [ ! -x "$YQ" ]; then
   echo "==> Installing yq (reads apps.yaml)"
   curl -fsSL -o "$YQ" "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${TF_ARCH}"
   chmod +x "$YQ"
@@ -84,21 +100,61 @@ if ! command -v crane >/dev/null 2>&1; then
     | tar -xz -C "$BIN" crane
 fi
 
-echo "==> Getting the latest infra code"
-if [ -d "$WORKDIR/.git" ]; then
-  git -C "$WORKDIR" fetch -q --depth 1 origin main
-  git -C "$WORKDIR" reset -q --hard origin/main
-else
-  git clone -q --depth 1 "$REPO_URL" "$WORKDIR"
+# One deploy at a time. The deployer Lambda holds /30apps/deployer/lock while it runs (and tells this script
+# so with DEPLOY_LOCK_HELD). A manual run takes the same lock, so it can't collide with an automatic one.
+# create-without-overwrite is atomic: only one caller can create the parameter. The value is JSON with an
+# expiry, so a run that died without cleaning up blocks others only until then.
+LOCK_NAME="/30apps/deployer/lock"
+LOCK_MINE=0
+release_lock() { if [ "$LOCK_MINE" = 1 ]; then aws ssm delete-parameter --name "$LOCK_NAME" >/dev/null 2>&1 || true; fi; }
+take_lock() {
+  local value now expires holder
+  now="$(date +%s)"
+  value="$(jq -nc --arg h cloudshell --argjson e "$((now + 5400))" '{holder:$h,expires:$e}')"
+  if aws ssm put-parameter --name "$LOCK_NAME" --type String --value "$value" >/dev/null 2>&1; then LOCK_MINE=1; return 0; fi
+  expires="$(aws ssm get-parameter --name "$LOCK_NAME" --query Parameter.Value --output text 2>/dev/null | jq -r '.expires // 0' 2>/dev/null || echo 0)"
+  if [ -z "$expires" ] || [ "$expires" = "null" ]; then expires=0; fi
+  if [ "$now" -gt "$expires" ] 2>/dev/null; then
+    echo "==> Found an expired deploy lock; taking it over"
+    aws ssm put-parameter --name "$LOCK_NAME" --type String --overwrite --value "$value" >/dev/null
+    LOCK_MINE=1
+    return 0
+  fi
+  holder="$(aws ssm get-parameter --name "$LOCK_NAME" --query Parameter.Value --output text 2>/dev/null | jq -r '.holder // "another deploy"' 2>/dev/null || echo "another deploy")"
+  echo "==> ERROR: ${holder} is deploying right now (lock ${LOCK_NAME}). Wait a few minutes and rerun."
+  echo "    If you are sure nothing is running: aws ssm delete-parameter --name ${LOCK_NAME}"
+  return 1
+}
+if [ "${DEPLOY_LOCK_HELD:-}" != "1" ]; then
+  take_lock
+  trap release_lock EXIT
 fi
-cd "$WORKDIR/stacks/aws"
+
+if [ -n "${AWS_DEPLOY_SRC:-}" ]; then
+  echo "==> Using the infra code in ${AWS_DEPLOY_SRC}"
+  cd "$AWS_DEPLOY_SRC/stacks/aws"
+else
+  echo "==> Getting the latest infra code"
+  if [ -d "$WORKDIR/.git" ]; then
+    git -C "$WORKDIR" fetch -q --depth 1 origin main
+    git -C "$WORKDIR" reset -q --hard origin/main
+  else
+    git clone -q --depth 1 "$REPO_URL" "$WORKDIR"
+  fi
+  cd "$WORKDIR/stacks/aws"
+fi
 rm -rf .terraform  # left over from older runs that used the home folder
 
-terraform init -input=false -reconfigure \
+# Quiet on success; on failure show why (a bare `>/dev/null` used to hide it).
+if ! terraform init -input=false -reconfigure \
   -backend-config="bucket=${BUCKET}" \
   -backend-config="key=aws/terraform.tfstate" \
   -backend-config="region=${REGION}" \
-  -backend-config="use_lockfile=true" >/dev/null
+  -backend-config="use_lockfile=true" >"${TF_DATA_DIR}.init.log" 2>&1; then
+  tail -n 40 "${TF_DATA_DIR}.init.log"
+  echo "==> ERROR: terraform init failed"
+  exit 1
+fi
 echo "==> Terraform initialized"
 
 # Once Terraform has created DNS records in Cloudflare, a run without the token would plan to delete them
@@ -123,7 +179,7 @@ collect_app_secrets() {
   if [ -z "$names" ]; then return 0; fi
   tmp="$(umask 077 && mktemp -d)"
   # shellcheck disable=SC2064  # expand $tmp now: it is local to this function
-  trap "rm -rf '$tmp'" EXIT
+  trap "rm -rf '$tmp'; release_lock" EXIT  # replaces the lock trap above, so it releases the lock too
   while [ -n "$names" ]; do
     n=$((n + 1))
     # shellcheck disable=SC2046  # the names are plain /30apps/<app>/<VAR> words
@@ -214,9 +270,20 @@ echo "==> Deploying the apps (with automatic DNS, a new custom domain waits up t
 terraform apply -input=false -auto-approve
 
 echo "==> Checking each app"
-terraform output -json urls | jq -r 'to_entries[] | "\(.key) \(.value)"' | while read -r name url; do
-  status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "${url}/api/health" || true)"
+unhealthy=""
+health_deadline=$((SECONDS + ${HEALTH_WAIT_SECONDS:-0}))
+while read -r name url; do
+  while :; do
+    status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "${url}/api/health" || true)"
+    if [ "$status" = "200" ] || [ "$SECONDS" -ge "$health_deadline" ]; then break; fi
+    sleep 10
+  done
   echo "    ${name}: ${url}  (health: HTTP ${status})"
-done
+  if [ "$status" != "200" ]; then unhealthy="${unhealthy}${unhealthy:+, }${name} (HTTP ${status})"; fi
+done < <(terraform output -json urls | jq -r 'to_entries[] | "\(.key) \(.value)"')
 print_dns_records "$(terraform output -json dns_records)"
+if [ -n "$unhealthy" ] && [ "${DEPLOY_STRICT_HEALTH:-}" = "1" ]; then
+  echo "==> ERROR: unhealthy after the deploy: ${unhealthy}"
+  exit 3
+fi
 echo "==> Done. A 503 right after the first deploy usually means the app is still migrating; check again in a minute."
