@@ -56,40 +56,106 @@ idea as the Oracle VM's agent). Nothing in GitHub holds an AWS credential, and t
 
 ```
 EventBridge Scheduler (every 10 min) -> Lambda "apps30-deployer" (arm64 container image from ECR, 2 GB, 15 min)
-  1. GitHub: what commit is main?  (read-only REST call, no sign-in)      same as /30apps/deployer/last_sha? stop.
-  2. download that exact commit's tarball (by SHA), run ITS deploy/aws.sh  <- the same script CloudShell runs
-  3. success: write last_sha.  Always: write last_result (JSON).           logs: CloudWatch, JSON lines
+  1. GitHub: what commit is main?  (read-only call, no sign-in)            same as /30apps/deployer/last_sha? stop.
+  2. download that exact commit's tarball (by SHA)                          same AWS-relevant hash as last time? record the SHA, stop.
+  3. run THAT commit's deploy/aws.sh (the same script the CloudShell one-liner runs):
+     plan, refuse if it deletes or replaces anything, apply, copy images, health checks
+  4. success: write last_sha and last_hash.  Always: write last_result (JSON).   logs: CloudWatch, JSON lines
 ```
 
 - **The deploy logic lives in this repo** (`deploy/aws.sh`), so a fix merged to `main` reaches AWS with no rebuild.
   The image (`deploy/lambda/`) only holds the tools (Terraform, crane, yq, AWS CLI), the Terraform providers
-  (a filesystem mirror, so Lambda's small `/tmp` is enough) and the ~200-line runner `deploy/lambda/deployer.sh`.
-  It is built by the **AWS deployer image** workflow and pushed to `ghcr.io/breakthrudevelopment/30apps-deployer`
-  (public) only on `main`; pull requests build and smoke-test it without pushing. Lambda can only run ECR images, so
-  the bootstrap copies it into ECR with crane.
-- **What triggers a deploy:** any new commit on `main` (not only `apps.yaml`; a no-op Terraform run is harmless). A run
-  that is already in progress is never overlapped: a Parameter Store lock (and reserved concurrency 1 where the account
-  allows it). `deploy/aws.sh` takes the same lock when you run it in CloudShell. A commit that fails is retried at most
-  3 times, 25+ minutes apart, then left alone until a new commit or a forced run, so a broken commit can't burn compute.
-- **Where results are:** `aws ssm get-parameter --name /30apps/deployer/last_result` (sha, ok, time, message), or run
-  `... | bash -s -- status`. The `urls`, health checks and DNS records print into the CloudWatch log group
-  `/aws/lambda/apps30-deployer` (14 days). Terraform masks sensitive values and nothing prints a secret; secrets still
-  live only in Parameter Store (`/30apps/...`, read by `deploy/aws.sh`) exactly as before.
+  (a filesystem mirror, so Lambda's small `/tmp` is enough) and the small runner `deploy/lambda/deployer.sh`.
+- **What triggers a deploy:** a new commit on `main` that changes something AWS runs: the AWS entries of `apps.yaml`,
+  `stacks/aws/**` (the provider lock file included) or `deploy/aws.sh`. The deployer hashes those files; if the hash equals
+  the last deploy's, it records the commit and stops without running Terraform. Changes to secrets in Parameter Store are
+  not commits: use `deploy` (below) after changing one.
+- **No overlap:** a Parameter Store lock with a random holder id and an expiry (and reserved concurrency 1 where the
+  account allows it). `deploy/aws.sh` takes the same lock when you run it in CloudShell. A lock error such as `AccessDenied`
+  stops the run; it is never treated as "busy".
+- **Retries:** a commit that fails is retried at most 3 times, 25+ minutes apart, then left alone until a new commit or a
+  forced run. A new custom domain waits up to 15 minutes for its certificate; if a run hits Lambda's 15 minute limit,
+  Terraform is stopped gracefully (it keeps what it finished), and the next attempt continues the wait.
+- **No surprise deletions:** every apply is `plan`, check, `apply`. If the plan **deletes or replaces** anything (removing
+  an app from `apps.yaml`, changing a certificate's domain, ...) an automatic run stops with exit 4 and `last_result`
+  says `destroy: refused`; it is not retried. Review the plan, then run `bash -s -- deploy --allow-destroy` (one run), or
+  approve one specific commit: `aws ssm put-parameter --name /30apps/deployer/allow_destroy --type String --overwrite --value <full commit sha>`.
+  The shared database also has `prevent_destroy = true`, so Terraform can't delete or replace it even then (edit the stack
+  on purpose to do that).
+- **Where results are:** `... | bash -s -- status`, or `aws ssm get-parameter --name /30apps/deployer/last_result`
+  (sha, ok, time, message, destroy). Details are in CloudWatch `/aws/lambda/apps30-deployer` (14 days). Terraform masks
+  sensitive values and nothing prints a secret; secrets live only in Parameter Store (`/30apps/...`) as before.
+- **Stuck lock:** if a run was killed hard (not the graceful stop above), Terraform's S3 state lock can stay behind and
+  the next run fails with `Error acquiring the state lock` and a lock ID. In CloudShell:
+  `cd ~/30-apps-infra/stacks/aws && terraform init -reconfigure -backend-config=... && terraform force-unlock <id>` (with the same
+  `-backend-config` flags as the `terraform init` in `deploy/aws.sh`), after checking that no deploy is running. A stale
+  Parameter Store lock (`/30apps/deployer/lock`) expires by itself, or: `aws ssm delete-parameter --name /30apps/deployer/lock`.
 - **IAM:** the function's role `apps30-deployer` has one inline policy scoped to this stack (state bucket, `30apps-*`
   Lambda/ECR/log names, API Gateway, RDS, security groups, ACM, Parameter Store `/30apps/*`, and IAM only for the one
-  role `30apps-lambda` and only to attach the basic logging policy). It can't touch its own role or function. It is
-  written in `bootstrap/aws-autodeploy.sh` (`write_policy`). If the policy ever misses an action, the deploy log shows the
-  `AccessDenied`; `DEPLOYER_BROAD=1` on a bootstrap rerun adds the AWS-managed `PowerUserAccess` (what the old GitHub deploy
-  role had).
-- **Cost:** all within free tiers. Scheduler: ~4,300 invocations a month (14,000,000 free). Lambda: a no-change check is
-  ~2 s at 2 GB (~4 GB-s, ~17,000 GB-s a month) and a typical deploy 3 to 8 minutes (~400 to 1,000 GB-s); 400,000 GB-s
-  and 1,000,000 requests are free every month. The worst case, a commit that keeps failing, is capped at 3 runs of 15
-  minutes (5,400 GB-s). ECR storage (~0.4 GB, two images kept) and CloudWatch Logs are negligible and come from Free plan
-  credits like the rest.
+  role `30apps-lambda` and only to attach the basic logging policy). Explicit **Deny** statements always apply: it cannot
+  touch its own function, role, image repository, schedule or log group, and cannot write Parameter Store outside
+  `/30apps/deployer/`. The policy is written in `bootstrap/aws-autodeploy.sh` (`write_policy`). If it ever misses an action,
+  the deploy log shows the `AccessDenied`; `DEPLOYER_BROAD=1` on a bootstrap rerun adds the AWS-managed `PowerUserAccess`
+  (what the old GitHub deploy role had; the Denies still apply), and a rerun without the flag removes it again.
+- **Versions:** Terraform is pinned in `deploy/aws.sh` and the image's Dockerfile (CI checks they are equal), and the
+  providers come from the committed `stacks/aws/.terraform.lock.hcl`, used by CloudShell and by the image build. That is
+  for consistency: the CloudShell fallback and the deployer then plan and write state with the same tool versions instead of
+  whatever was newest on the day. To bump providers: run the *AWS provider lock* workflow, download its `generated-lock` artifact into
+  `stacks/aws/.terraform.lock.hcl` and open a PR (CI checks the lock against `main.tf` and that the image's providers match
+  it). To bump Terraform: change `TERRAFORM_VERSION` in both places.
 
-**One-time setup**, after the first successful CloudShell deploy and once the *AWS deployer image* workflow has run on
-`main`: (1) GitHub, Packages, `30apps-deployer`, Package settings, change visibility to **Public** (Lambda can only pull
-through ECR, and the bootstrap copies it without credentials); (2) in AWS CloudShell:
+#### Protect main first
+
+The deployer runs whatever is on `main` with the account's permissions, so the bootstrap **refuses to install, resume or
+deploy until GitHub reports `main` protected** by a pull-request rule. Set it up once in GitHub, repository **Settings**,
+**Rules**, **Rulesets**, **New ruleset**, **New branch ruleset**:
+
+| Setting | Value |
+| --- | --- |
+| Ruleset name | `protect-main` |
+| Enforcement status | **Active** |
+| Bypass list | empty |
+| Target branches | **Add target**, **Include default branch** (main) |
+| Restrict deletions | on |
+| Block force pushes | on |
+| Require a pull request before merging | on, **Required approvals: 0** (CI plus review is enough; approvals would block the normal merge flow). Leave the other sub-options off |
+| Require status checks to pass | on, add the checks that must pass (for example `Validate aws`, `Validate azure`, `Validate gcp`, `Validate oci`, `Shellcheck`, `Build and test the image`); leave **Require branches to be up to date** off unless you want it |
+| Everything else | off |
+
+Check it: `curl -s https://api.github.com/repos/BreakthruDevelopment/30-apps-infra/rules/branches/main` lists a rule of
+type `pull_request`. (Classic branch protection that sets `protected: true` is accepted too.)
+
+#### Image provenance
+
+The deployer image is built by the *AWS deployer image* workflow. Pull requests build and test it with read-only
+permissions. Only the separate **push** job, which runs only for pushes to `main`, has `packages: write` and
+`id-token: write`: it pushes `ghcr.io/breakthrudevelopment/30apps-deployer` and **signs the pushed digest keyless with
+cosign** (Sigstore; the certificate names this workflow on `refs/heads/main`). The bootstrap installs a pinned, checksummed
+cosign to a private temp folder, resolves the image's digest, runs
+`cosign verify --certificate-identity https://github.com/BreakthruDevelopment/30-apps-infra/.github/workflows/aws-deployer-image.yml@refs/heads/main --certificate-oidc-issuer https://token.actions.githubusercontent.com`
+and copies it into ECR **by that verified digest**, never a tag, then checks ECR holds the same digest. Actions in the workflow, the
+base image, crane, cosign and yq are pinned by commit or digest, with checksums where upstream publishes them. Downloads
+must stay on https.
+
+**Cost** (all within free tiers, but not negligible: the deployer image is large, about 1.5 GB with the providers).
+
+| Item | Estimate | Free tier per month |
+| --- | --- | --- |
+| Scheduler invocations | about 4,320 | 14,000,000 |
+| Lambda requests | about 4,320 | 1,000,000 |
+| A no-change check | the function is often cold (10 minutes apart) and loads a large image: plan on **10 to 20 s at 2 GB**, i.e. 20 to 40 GB-s, so about **86,000 to 173,000 GB-s** a month | 400,000 GB-s |
+| A deploy | 3 to 8 minutes, about 400 to 1,000 GB-s; 30 deploys about 12,000 to 30,000 | |
+| A commit that keeps failing | at most 3 attempts x 15 min x 2 GB = 5,400 GB-s | |
+
+So checks use roughly a quarter to two fifths of the free compute and a busy month of deploys adds a few percent; both fit with
+room, but if you add more scheduled work, check CloudWatch's `Billed Duration`. A cheaper schedule is a one-line change
+(`rate(10 minutes)` in `bootstrap/aws-autodeploy.sh`). **ECR storage:** the deployer image (about 0.5 GB compressed) plus two
+images per app can exceed ECR's 500 MB free storage; the excess (about $0.10 per GB-month) is drawn from Free plan credits.
+CloudWatch Logs (14 days) are small. There is no extra ephemeral storage, VPC, NAT, DynamoDB or key.
+
+**One-time setup**, after the first successful CloudShell deploy and once the *AWS deployer image* workflow has pushed to `main`:
+(1) protect `main` (above); (2) GitHub, Packages, `30apps-deployer`, Package settings, change visibility to **Public**
+(Lambda can only run ECR images, and the bootstrap copies it without credentials); (3) in AWS CloudShell:
 
 ```
 curl -fsSL https://raw.githubusercontent.com/BreakthruDevelopment/30-apps-infra/main/bootstrap/aws-autodeploy.sh | bash
@@ -101,21 +167,15 @@ the script a command with `bash -s -- <command>`:
 
 | Command | Does |
 | --- | --- |
-| *(none)* | Install or update. Rerun it to pick up a new deployer image (when `deploy/lambda/` or the provider constraints in `stacks/aws/main.tf` changed and the workflow pushed a new image) |
+| *(none)* | Install or update. Rerun it to pick up a new deployer image (after `deploy/lambda/`, the provider lock or `stacks/aws/main.tf` changed and the workflow pushed a new image) |
 | `pause` / `resume` | Stop or restart the schedule. While paused, use the CloudShell one-liner |
-| `deploy` | Deploy now even if `main` hasn't changed (also what to do after changing a Parameter Store secret), and print the result |
+| `deploy` | Deploy now even if nothing changed (also what to do after changing a Parameter Store secret), and print the result |
+| `deploy --allow-destroy` | The same, but this one run may apply a plan that deletes or replaces resources |
 | `status` | Schedule, last deployed commit and result, lock, whether `main` moved |
 | `remove` | Delete everything the script created (apps and Terraform state are untouched) |
 
-Terraform and its providers are fixed in the image (Terraform pinned in `deploy/aws.sh` and the Dockerfile, which CI keeps equal, because Terraform won't read state written by a newer version; providers as resolved from the version constraints
-in `stacks/aws/main.tf` when the image was built; the stack has no committed `.terraform.lock.hcl`). If a deploy fails with
-a provider version error after a CloudShell run upgraded the providers, rerun the bootstrap after the image workflow has
-rebuilt (run it from the Actions tab if `main.tf` didn't change).
-
-**Gemini key:** apps with `ai: gemini` get the key from the `GEMINI_API_KEY` secret in the `production`
-environment (Azure, Google Cloud) or from AWS Parameter Store (`/30apps/gemini_api_key`, read by `deploy/aws.sh`).
-Without a key they serve demo answers. The Oracle VM reads it from `/opt/30apps/env/shared.env`, which isn't
-set up yet, so Oracle apps run on demo answers for now.
+A new deployer image is only pushed when a file under `deploy/lambda/`, `stacks/aws/main.tf` or the lock file changes
+on `main`; to force a rebuild, change `deploy/lambda/Dockerfile` (for example bump a pin) in a PR.
 
 ## Per-app secrets
 

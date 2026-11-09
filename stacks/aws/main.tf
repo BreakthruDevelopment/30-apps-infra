@@ -117,7 +117,8 @@ resource "aws_db_instance" "main" {
   apply_immediately       = true
 
   lifecycle {
-    ignore_changes = [engine_version] # minor upgrades are applied automatically
+    ignore_changes  = [engine_version] # minor upgrades are applied automatically
+    prevent_destroy = true             # the only copy of every app's data on AWS: Terraform must never delete or replace it
   }
 }
 

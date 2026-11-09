@@ -4,3 +4,5 @@
 __pycache__/
 *.pem
 .terraform.lock.hcl
+# The AWS stack's lock is committed: the CloudShell flow and the deployer image build both use it.
+!stacks/aws/.terraform.lock.hcl
