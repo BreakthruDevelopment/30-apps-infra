@@ -1,0 +1,46 @@
+name: AWS provider lock
+
+# stacks/aws/.terraform.lock.hcl is committed and used by the CloudShell flow and the deployer image build.
+# This workflow checks that it still satisfies stacks/aws/main.tf (checksums for the runner included) and always
+# uploads a freshly generated one (linux_amd64 for CloudShell, linux_arm64 for the Lambda image) as an artifact:
+# to bump providers, download "generated-lock", copy it over stacks/aws/.terraform.lock.hcl and open a PR.
+
+on:
+  pull_request:
+    paths:
+      - "stacks/aws/**"
+      - ".github/workflows/aws-provider-lock.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lock:
+    name: Provider lock
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.17.1"
+          terraform_wrapper: false
+      - name: The committed lock satisfies main.tf
+        run: |
+          test -f stacks/aws/.terraform.lock.hcl
+          cd stacks/aws
+          terraform init -backend=false -input=false -lockfile=readonly
+      - name: Generate a fresh lock for both platforms
+        if: always()
+        run: |
+          mkdir -p /tmp/gen && cp -r stacks /tmp/gen/ && cp apps.yaml /tmp/gen/
+          cd /tmp/gen/stacks/aws
+          rm -f .terraform.lock.hcl
+          terraform providers lock -platform=linux_amd64 -platform=linux_arm64
+          cat .terraform.lock.hcl | grep -E '^provider|version ='
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: generated-lock
+          path: /tmp/gen/stacks/aws/.terraform.lock.hcl
+          retention-days: 7
