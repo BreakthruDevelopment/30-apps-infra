@@ -1,0 +1,155 @@
+name: AWS deployer image
+
+# Builds the image of the AWS "deployer" Lambda (deploy/lambda/, see README "AWS: automatic deploys").
+#
+# Pull requests (and the build job on main): shellcheck, build, smoke-test the image with read-only
+#   permissions (contents: read). No registry login, no push, no signing.
+# Push to main only: a separate job, the only one with packages: write and id-token: write, pushes
+#   ghcr.io/breakthrudevelopment/30apps-deployer (:latest and :sha-<7>) and signs the pushed digest keyless with
+#   cosign (Sigstore: the signature's certificate names this workflow on refs/heads/main).
+#   bootstrap/aws-autodeploy.sh verifies that signature before it copies the image into ECR, and copies by digest.
+#
+# Actions are pinned to commit SHAs (the comment shows the tag they were taken from).
+
+on:
+  pull_request:
+    paths:
+      - "deploy/lambda/**"
+      - "deploy/aws.sh"
+      - "bootstrap/aws-autodeploy.sh"
+      - "stacks/aws/main.tf"
+      - "stacks/aws/.terraform.lock.hcl"
+      - ".github/workflows/aws-deployer-image.yml"
+  push:
+    branches: [main]
+    paths:
+      - "deploy/lambda/**"
+      - "stacks/aws/main.tf"
+      - "stacks/aws/.terraform.lock.hcl"
+      - ".github/workflows/aws-deployer-image.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aws-deployer-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/breakthrudevelopment/30apps-deployer
+  COSIGN_VERSION: v2.6.5 # keep equal to COSIGN_VERSION in bootstrap/aws-autodeploy.sh
+
+jobs:
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - run: shellcheck -x deploy/aws.sh bootstrap/aws-autodeploy.sh deploy/lambda/bootstrap deploy/lambda/deployer.sh
+
+  image:
+    name: Build and test the image
+    runs-on: ubuntu-24.04-arm # the image is arm64 (Graviton Lambda); public repositories get these runners free
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/lambda/Dockerfile
+          platforms: linux/arm64
+          load: true
+          push: false
+          # Lambda can't run an image index: no provenance or SBOM attestations next to the image.
+          provenance: false
+          sbom: false
+          tags: ${{ env.IMAGE }}:test
+      - name: Smoke test (read-only root, 512 MB /tmp, like Lambda)
+        run: |
+          docker run --rm --read-only --tmpfs /tmp:rw,exec,size=512m -v "$PWD:/repo:ro" \
+            -e PINNED="$(grep -oP '^TERRAFORM_VERSION="\K[^"]+' deploy/aws.sh)" \
+            --entrypoint bash "$IMAGE:test" -euxo pipefail -c '
+              terraform version
+              [ "$(terraform version -json | jq -r .terraform_version)" = "$PINNED" ]
+              crane version
+              yq-go --version
+              aws --version
+              jq --version
+              command -v curl timeout sed grep tar
+              bash -n /var/runtime/bootstrap
+              bash -n /var/task/deployer.sh
+              # The mirror must satisfy the committed lock file exactly: init with the lock read-only, validate,
+              # and see how much of /tmp it used.
+              export HOME=/tmp/home TF_DATA_DIR=/tmp/tfdata
+              mkdir -p /tmp/work/stacks /tmp/home
+              cp -r /repo/stacks/aws /tmp/work/stacks/aws
+              cp /repo/apps.yaml /tmp/work/apps.yaml
+              cd /tmp/work/stacks/aws
+              test -f .terraform.lock.hcl
+              terraform init -backend=false -input=false -lockfile=readonly
+              terraform validate
+              du -sm /tmp
+              ls -la /tmp/tfdata/providers/registry.terraform.io/*/*/*/
+            '
+      - name: Save the tested image for the push job (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: docker save "$IMAGE:test" | gzip -1 > "$RUNNER_TEMP/image.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          name: deployer-image
+          path: ${{ runner.temp }}/image.tar.gz
+          retention-days: 1
+          compression-level: 0
+
+  push:
+    name: Push and sign the image
+    needs: [shellcheck, image]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+      id-token: write # keyless cosign signature (Sigstore)
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: deployer-image
+          path: ${{ runner.temp }}
+      - name: Load the image that was tested
+        run: gunzip -c "$RUNNER_TEMP/image.tar.gz" | docker load
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push
+        id: push
+        run: |
+          short="${GITHUB_SHA:0:7}"
+          docker tag "$IMAGE:test" "$IMAGE:latest"
+          docker tag "$IMAGE:test" "$IMAGE:sha-${short}"
+          docker push "$IMAGE:sha-${short}" | tee "$RUNNER_TEMP/push.log"
+          docker push "$IMAGE:latest" | tee -a "$RUNNER_TEMP/push.log"
+          digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' "$RUNNER_TEMP/push.log" | tail -n 1)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+      - name: Sign the pushed digest (keyless) and verify the signature the way the bootstrap will
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+          cosign verify \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/aws-deployer-image.yml@refs/heads/main" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${IMAGE}@${DIGEST}" > /dev/null
+          {
+            echo "Pushed and signed ${IMAGE}@${DIGEST} (:latest, :sha-${GITHUB_SHA:0:7})."
+            echo "The package must be public (Packages, 30apps-deployer, Package settings)."
+          } >> "$GITHUB_STEP_SUMMARY"

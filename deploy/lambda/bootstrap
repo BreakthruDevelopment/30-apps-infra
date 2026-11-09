@@ -1,0 +1,29 @@
+#!/bin/bash
+# Lambda custom runtime: asks the Runtime API for the next invocation, runs handler() from deployer.sh
+# (the function named by CMD, "deployer.handler"), and posts the result. Stdout of handler() is the
+# response; logs go to stderr (CloudWatch gets both).
+set -uo pipefail
+
+# shellcheck source=deploy/lambda/deployer.sh
+source "${LAMBDA_TASK_ROOT}/${_HANDLER%%.*}.sh"
+
+api="http://${AWS_LAMBDA_RUNTIME_API}/2018-06-01/runtime"
+
+while true; do
+  headers="$(mktemp)"
+  if ! event="$(curl -sS -LD "$headers" "${api}/invocation/next")"; then
+    sleep 1
+    continue
+  fi
+  request_id="$(tr -d '\r' <"$headers" | grep -i '^lambda-runtime-aws-request-id:' | cut -d' ' -f2)"
+  DEADLINE_MS="$(tr -d '\r' <"$headers" | grep -i '^lambda-runtime-deadline-ms:' | cut -d' ' -f2)"
+  export DEADLINE_MS
+  rm -f "$headers"
+
+  if response="$(handler "$event")"; then
+    curl -sS -X POST "${api}/invocation/${request_id}/response" -d "$response" >/dev/null
+  else
+    curl -sS -X POST "${api}/invocation/${request_id}/error" \
+      -d '{"errorMessage":"deployer crashed (see the log)","errorType":"DeployerError"}' >/dev/null
+  fi
+done

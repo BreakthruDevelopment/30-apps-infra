@@ -5,7 +5,8 @@ name: Terraform
 # main: apply Azure, Google Cloud and Oracle from the "production" environment. Oracle's apply also
 #   creates its apps' DNS records in Cloudflare, and so do Azure's and Google Cloud's, for custom domains (environment secret
 #   CLOUDFLARE_API_TOKEN, passed to those apply steps only). Pull-request plans never get the token.
-# AWS is applied from AWS CloudShell with deploy/aws.sh (see README).
+# AWS is not applied here: the deployer Lambda in the AWS account pulls main and runs deploy/aws.sh
+#   (README, "AWS: automatic deploys"); AWS CloudShell with deploy/aws.sh is the manual fallback.
 
 on:
   pull_request:
