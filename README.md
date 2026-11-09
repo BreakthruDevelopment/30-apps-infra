@@ -119,7 +119,7 @@ deploy until GitHub reports `main` protected** by a pull-request rule. Set it up
 | Restrict deletions | on |
 | Block force pushes | on |
 | Require a pull request before merging | on, **Required approvals: 0** (CI plus review is enough; approvals would block the normal merge flow). Leave the other sub-options off |
-| Require status checks to pass | on, add the checks that must pass (for example `Validate aws`, `Validate azure`, `Validate gcp`, `Validate oci`, `Shellcheck`, `Build and test the image`); leave **Require branches to be up to date** off unless you want it |
+| Require status checks to pass | on, add only `Validate aws`, `Validate azure`, `Validate gcp` and `Validate oci` (the Terraform workflow runs them on every pull request; the deployer-image and provider-lock checks run only when their files change, so requiring them would block every other pull request); leave **Require branches to be up to date** off |
 | Everything else | off |
 
 Check it: `curl -s https://api.github.com/repos/BreakthruDevelopment/30-apps-infra/rules/branches/main` lists a rule of
