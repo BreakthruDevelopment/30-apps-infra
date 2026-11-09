@@ -37,10 +37,11 @@ jobs:
           cd /tmp/gen/stacks/aws
           rm -f .terraform.lock.hcl
           terraform providers lock -platform=linux_amd64 -platform=linux_arm64
-          cat .terraform.lock.hcl | grep -E '^provider|version ='
+          cat .terraform.lock.hcl
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: generated-lock
           path: /tmp/gen/stacks/aws/.terraform.lock.hcl
           retention-days: 7
+          include-hidden-files: true
