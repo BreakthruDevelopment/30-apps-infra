@@ -107,7 +107,7 @@ the script a command with `bash -s -- <command>`:
 | `status` | Schedule, last deployed commit and result, lock, whether `main` moved |
 | `remove` | Delete everything the script created (apps and Terraform state are untouched) |
 
-Terraform and its providers are fixed in the image (Terraform 1.12.x; providers as resolved from the version constraints
+Terraform and its providers are fixed in the image (Terraform pinned in `deploy/aws.sh` and the Dockerfile, which CI keeps equal, because Terraform won't read state written by a newer version; providers as resolved from the version constraints
 in `stacks/aws/main.tf` when the image was built; the stack has no committed `.terraform.lock.hcl`). If a deploy fails with
 a provider version error after a CloudShell run upgraded the providers, rerun the bootstrap after the image workflow has
 rebuilt (run it from the Actions tab if `main.tf` didn't change).

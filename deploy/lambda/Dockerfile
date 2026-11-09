@@ -7,10 +7,11 @@
 # image as an unpacked "filesystem mirror": `terraform init` links them instead of copying them into /tmp.
 FROM --platform=linux/arm64 public.ecr.aws/lambda/provided:al2023
 
-# Versions of the tools. Terraform matches the CI's "^1.12.0" and the stack's "required_version >= 1.12".
+# Versions of the tools. Terraform must equal TERRAFORM_VERSION in deploy/aws.sh (CI checks): Terraform refuses to
+# read a state file written by a newer version, so the deployer and the CloudShell fallback must run the same one.
 # The providers are not pinned here: they are whatever stacks/aws/main.tf's version constraints resolve to
 # when the image is built (the stack has no committed .terraform.lock.hcl). A change to main.tf rebuilds the image.
-ARG TERRAFORM_VERSION=1.12.2
+ARG TERRAFORM_VERSION=1.17.1
 ARG CRANE_VERSION=v0.20.3
 ARG YQ_VERSION=v4.44.3
 

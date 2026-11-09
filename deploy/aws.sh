@@ -74,11 +74,13 @@ case "$(uname -m)" in
   *) echo "Unsupported CPU: $(uname -m)"; exit 1 ;;
 esac
 
+# Terraform is pinned (the same version as the deployer image, which CI checks) rather than "latest":
+# Terraform refuses to read a state file written by a newer version, so every runner must agree.
+TERRAFORM_VERSION="1.17.1"
 if ! command -v terraform >/dev/null 2>&1; then
-  TF_VERSION="$(curl -fsSL https://checkpoint-api.hashicorp.com/v1/check/terraform | jq -r .current_version)"
-  echo "==> Installing Terraform ${TF_VERSION}"
+  echo "==> Installing Terraform ${TERRAFORM_VERSION}"
   curl -fsSL -o /tmp/terraform.zip \
-    "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_${TF_ARCH}.zip"
+    "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${TF_ARCH}.zip"
   unzip -o -q /tmp/terraform.zip terraform -d "$BIN"
   rm -f /tmp/terraform.zip
 fi

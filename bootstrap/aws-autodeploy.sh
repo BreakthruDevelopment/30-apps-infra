@@ -240,10 +240,10 @@ run_once() {
 
 remove_all() {
   say "Removing the automatic deploy (apps, their state and the CloudShell flow are not touched)"
-  aws scheduler delete-schedule --name "$SCHEDULE" >/dev/null 2>&1 && say "Deleted schedule" || true
-  aws lambda delete-function --function-name "$FN" >/dev/null 2>&1 && say "Deleted function" || true
-  aws logs delete-log-group --log-group-name "$LOG_GROUP" >/dev/null 2>&1 && say "Deleted log group" || true
-  aws ecr delete-repository --repository-name "$ECR_REPO" --force >/dev/null 2>&1 && say "Deleted ECR repository" || true
+  if aws scheduler delete-schedule --name "$SCHEDULE" >/dev/null 2>&1; then say "Deleted schedule"; fi
+  if aws lambda delete-function --function-name "$FN" >/dev/null 2>&1; then say "Deleted function"; fi
+  if aws logs delete-log-group --log-group-name "$LOG_GROUP" >/dev/null 2>&1; then say "Deleted log group"; fi
+  if aws ecr delete-repository --repository-name "$ECR_REPO" --force >/dev/null 2>&1; then say "Deleted ECR repository"; fi
   for r in "$ROLE" "$SCHED_ROLE"; do
     for p in $(aws iam list-role-policies --role-name "$r" --query 'PolicyNames[]' --output text 2>/dev/null || true); do
       aws iam delete-role-policy --role-name "$r" --policy-name "$p" >/dev/null 2>&1 || true
@@ -251,7 +251,7 @@ remove_all() {
     for p in $(aws iam list-attached-role-policies --role-name "$r" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || true); do
       aws iam detach-role-policy --role-name "$r" --policy-arn "$p" >/dev/null 2>&1 || true
     done
-    aws iam delete-role --role-name "$r" >/dev/null 2>&1 && say "Deleted role $r" || true
+    if aws iam delete-role --role-name "$r" >/dev/null 2>&1; then say "Deleted role $r"; fi
   done
   for p in last_sha last_result attempts lock; do aws ssm delete-parameter --name "$P/$p" >/dev/null 2>&1 || true; done
   say "Done."

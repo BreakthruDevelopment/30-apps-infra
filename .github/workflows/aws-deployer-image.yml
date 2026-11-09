@@ -64,8 +64,10 @@ jobs:
       - name: Smoke test (read-only root, 512 MB /tmp, like Lambda)
         run: |
           docker run --rm --read-only --tmpfs /tmp:rw,exec,size=512m -v "$PWD:/repo:ro" \
+            -e PINNED="$(grep -oP '^TERRAFORM_VERSION="\K[^"]+' deploy/aws.sh)" \
             --entrypoint bash "$IMAGE:test" -euxo pipefail -c '
               terraform version
+              [ "$(terraform version -json | jq -r .terraform_version)" = "$PINNED" ]
               crane version
               yq-go --version
               aws --version
