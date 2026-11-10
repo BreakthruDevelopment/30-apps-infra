@@ -54,3 +54,10 @@ apps:
     domain: app5.breakthruventures.ai
     ai: gemini
     secrets: [PLAID_CLIENT_ID, PLAID_SECRET, TOKEN_ENC_KEY]
+  - name: read-later
+    title: Bookmark and Read-Later
+    clouds: [azure]
+    image: ghcr.io/breakthrudevelopment/06-read-later
+    tag: sha-51175dd
+    domain: app6.breakthruventures.ai
+    ai: gemini
