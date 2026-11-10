@@ -61,3 +61,10 @@ apps:
     tag: sha-51175dd
     domain: app6.breakthruventures.ai
     ai: gemini
+  - name: loan-portal
+    title: Loan Application Portal
+    clouds: [oci]
+    image: ghcr.io/breakthrudevelopment/08-loan-portal
+    tag: sha-86a1723
+    domain: app8.breakthruventures.ai
+    ai: gemini
