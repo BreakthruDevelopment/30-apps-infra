@@ -46,3 +46,11 @@ apps:
     tag: sha-c91ffc1
     domain: app4.breakthruventures.ai
     ai: gemini
+  - name: budget-planner
+    title: Personal Budget Planner
+    clouds: [aws]
+    image: ghcr.io/breakthrudevelopment/05-budget-planner
+    tag: sha-31081ae
+    domain: app5.breakthruventures.ai
+    ai: gemini
+    secrets: [PLAID_CLIENT_ID, PLAID_SECRET, TOKEN_ENC_KEY]
