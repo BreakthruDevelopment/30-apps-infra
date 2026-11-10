@@ -46,3 +46,10 @@ apps:
     tag: sha-c91ffc1
     domain: app4.breakthruventures.ai
     ai: gemini
+  - name: read-later
+    title: Bookmark and Read-Later
+    clouds: [azure]
+    image: ghcr.io/breakthrudevelopment/06-read-later
+    tag: sha-51175dd
+    domain: app6.breakthruventures.ai
+    ai: gemini
