@@ -83,3 +83,10 @@ apps:
     domain: app9.breakthruventures.ai
     ai: gemini
     secrets: [STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET]
+  - name: inventory
+    title: Inventory Management
+    clouds: [azure]
+    image: ghcr.io/breakthrudevelopment/10-inventory
+    tag: sha-c284cb4
+    domain: app10.breakthruventures.ai
+    ai: gemini
