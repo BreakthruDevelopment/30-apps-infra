@@ -75,3 +75,10 @@ apps:
     tag: sha-4ab35b0
     domain: app7.breakthruventures.ai
     ai: gemini
+  - name: inventory
+    title: Inventory Management
+    clouds: [azure]
+    image: ghcr.io/breakthrudevelopment/10-inventory
+    tag: sha-c284cb4
+    domain: app10.breakthruventures.ai
+    ai: gemini
