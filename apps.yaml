@@ -90,3 +90,10 @@ apps:
     tag: sha-c284cb4
     domain: app10.breakthruventures.ai
     ai: gemini
+  - name: restaurant-ordering
+    title: Restaurant Ordering
+    clouds: [oci]
+    image: ghcr.io/breakthrudevelopment/12-restaurant-ordering
+    tag: sha-cbd6f0f
+    domain: app12.breakthruventures.ai
+    ai: gemini
