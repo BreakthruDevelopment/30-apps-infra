@@ -73,5 +73,5 @@ apps:
     clouds: [gcp]
     image: ghcr.io/breakthrudevelopment/07-appointment-booking
     tag: sha-4ab35b0
-    domain: null
+    domain: app7.breakthruventures.ai
     ai: gemini
