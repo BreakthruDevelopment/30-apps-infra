@@ -75,3 +75,11 @@ apps:
     tag: sha-4ab35b0
     domain: app7.breakthruventures.ai
     ai: gemini
+  - name: invoicing
+    title: Invoicing
+    clouds: [aws]
+    image: ghcr.io/breakthrudevelopment/09-invoicing
+    tag: sha-4171700
+    domain: app9.breakthruventures.ai
+    ai: gemini
+    secrets: [STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET]
