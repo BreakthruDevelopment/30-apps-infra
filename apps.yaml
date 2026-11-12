@@ -50,7 +50,7 @@ apps:
     title: Personal Budget Planner
     clouds: [aws]
     image: ghcr.io/breakthrudevelopment/05-budget-planner
-    tag: sha-31081ae
+    tag: sha-50aa60b
     domain: app5.breakthruventures.ai
     ai: gemini
     secrets: [PLAID_CLIENT_ID, PLAID_SECRET, TOKEN_ENC_KEY]
@@ -65,14 +65,14 @@ apps:
     title: Loan Application Portal
     clouds: [oci]
     image: ghcr.io/breakthrudevelopment/08-loan-portal
-    tag: sha-86a1723
+    tag: sha-713b6c3
     domain: app8.breakthruventures.ai
     ai: gemini
   - name: appointment-booking
     title: Appointment Booking
     clouds: [gcp]
     image: ghcr.io/breakthrudevelopment/07-appointment-booking
-    tag: sha-4ab35b0
+    tag: sha-0f8cdf3
     domain: app7.breakthruventures.ai
     ai: gemini
   - name: invoicing
@@ -87,13 +87,13 @@ apps:
     title: Inventory Management
     clouds: [azure]
     image: ghcr.io/breakthrudevelopment/10-inventory
-    tag: sha-c284cb4
+    tag: sha-881d16a
     domain: app10.breakthruventures.ai
     ai: gemini
   - name: restaurant-ordering
     title: Restaurant Ordering
     clouds: [oci]
     image: ghcr.io/breakthrudevelopment/12-restaurant-ordering
-    tag: sha-cbd6f0f
+    tag: sha-6bd0d02
     domain: app12.breakthruventures.ai
     ai: gemini
