@@ -97,3 +97,10 @@ apps:
     tag: sha-6bd0d02
     domain: app12.breakthruventures.ai
     ai: gemini
+  - name: helpdesk
+    title: Helpdesk Ticketing
+    clouds: [gcp]
+    image: ghcr.io/breakthrudevelopment/11-helpdesk
+    tag: sha-3fd1ca2
+    domain: null
+    ai: gemini
