@@ -102,5 +102,5 @@ apps:
     clouds: [gcp]
     image: ghcr.io/breakthrudevelopment/11-helpdesk
     tag: sha-3fd1ca2
-    domain: null
+    domain: app11.breakthruventures.ai
     ai: gemini
