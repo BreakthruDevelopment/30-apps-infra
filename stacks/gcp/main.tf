@@ -288,7 +288,8 @@ resource "google_cloud_run_v2_service" "app" {
   # 3600 s; 300 s is this repo's cap so a request can never hold the single free instance for long.
   lifecycle {
     precondition {
-      condition     = try(can(regex("^[0-9]{1,3}s$", tostring(each.value.timeout))) && tonumber(trimsuffix(each.value.timeout, "s")) >= 1 && tonumber(trimsuffix(each.value.timeout, "s")) <= 300, !contains(keys(each.value), "timeout"))
+      # One regex for the whole rule: 1 to 300 followed by "s". regex() on null or a number cannot match, so those fail.
+      condition     = can(regex("^([1-9][0-9]?|[12][0-9]{2}|300)s$", local.run_timeout[each.key]))
       error_message = "App ${each.key}: timeout must be a string of whole seconds from 1s to 300s (for example 300s); the default is 30s."
     }
   }
@@ -296,7 +297,7 @@ resource "google_cloud_run_v2_service" "app" {
   template {
     service_account                  = google_service_account.run.email
     max_instance_request_concurrency = 40
-    timeout                          = try(each.value.timeout, "30s")
+    timeout                          = local.run_timeout[each.key]
 
     scaling {
       min_instance_count = 0
@@ -410,6 +411,9 @@ locals {
 }
 
 locals {
+  # Per-app Cloud Run request timeout from apps.yaml; "30s" when the app doesn't set one.
+  run_timeout = { for name, a in local.apps : name => try(a.timeout, "30s") }
+
   # Names (never values) of the secrets each app declared in apps.yaml and that were supplied.
   app_secret_names = { for name, a in local.apps : name => [
     for v in try(a.secrets, []) : v if contains(nonsensitive(keys(try(var.app_secrets[name], {}))), v)
