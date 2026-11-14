@@ -9,6 +9,7 @@
 #   ai      "demo" (recorded answers) or "gemini"
 #   storage optional, true = a private upload bucket for the app (Google Cloud only; other clouds ignore it). See README "Object storage (Google Cloud)"
 #   secrets optional list of secret env var NAMES (never values); see README "Per-app secrets"
+#   timeout optional Cloud Run request timeout, Google Cloud only (other clouds ignore it): whole seconds with an "s", 1s to 300s; default 30s. See README "Request timeout (Google Cloud)"
 apps:
   - name: template
     clouds: [aws, azure, gcp, oci]

@@ -208,6 +208,21 @@ jobs:
             echo "copy $image:$tag -> $REPO/$name:$tag"
             crane copy --platform linux/amd64 "$image:$tag" "$REPO/$name:$tag"
           done
+      - name: Per-app secrets
+        # Each secret is named one by one (never the whole `secrets` context). A secret with no value is left
+        # out, so a missing one never fails the apply: the app just runs without it (README, "Per-app secrets").
+        # The values go to Terraform as one sensitive variable file, removed in the last step; nothing is echoed.
+        env:
+          COST_SCALER_GCP_PRICING_API_KEY: ${{ secrets.COST_SCALER_GCP_PRICING_API_KEY }}
+          COST_SCALER_REFRESH_TOKEN: ${{ secrets.COST_SCALER_REFRESH_TOKEN }}
+        run: |
+          umask 077
+          jq -n '{app_secrets: {
+              "cost-scaler": ({
+                COST_SCALER_GCP_PRICING_API_KEY: env.COST_SCALER_GCP_PRICING_API_KEY,
+                COST_SCALER_REFRESH_TOKEN: env.COST_SCALER_REFRESH_TOKEN
+              } | with_entries(select(.value != null and .value != "")))
+            }}' > "$RUNNER_TEMP/app-secrets.tfvars.json"
       - name: Apply
         # The Cloudflare token (Zone:DNS:Edit on breakthruventures.ai) is passed to this step only; DNS is
         # managed only when the secret exists.
@@ -215,9 +230,12 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           TF_VAR_manage_dns: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
           TF_VAR_cloudflare_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID }}
-        run: terraform apply -auto-approve -no-color
+        run: terraform apply -auto-approve -no-color -var-file="$RUNNER_TEMP/app-secrets.tfvars.json"
       - name: Health check
         run: bash ../../deploy/health.sh "$(terraform output -json urls)"
+      - name: Remove the secrets file
+        if: always()
+        run: rm -f "$RUNNER_TEMP/app-secrets.tfvars.json"
 
   apply-oci:
     name: Apply oci
