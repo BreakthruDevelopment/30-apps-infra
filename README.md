@@ -194,7 +194,8 @@ skipped with a warning that names it (never the value), so the deploy still goes
 | Cloud | Where the value lives | How to set it |
 | --- | --- | --- |
 | AWS | Parameter Store SecureString `/30apps/<name>/<VAR>`, read by `deploy/aws.sh` | In CloudShell, once per secret (the value is typed silently, so it doesn't show on screen or in history): |
-| Azure, Google Cloud | Not wired yet (no app needs it). The stacks already accept them; see below | — |
+| Google Cloud | GitHub environment secret, mapped by name in the Apply gcp job, passed to Terraform as a sensitive variable and set as a Cloud Run environment variable. Wired for `cost-scaler` (see below) | One secret in GitHub (below) |
+| Azure | Not wired yet (no app needs it). The stack already accepts them; see below | — |
 | Oracle | Not supported yet | The VM's agent doesn't read per-app secrets, so Oracle apps run without them |
 
 ```
@@ -202,7 +203,8 @@ read -rsp "Value: " V && echo && aws ssm put-parameter --region us-east-2 --name
 ```
 
 **Azure and Google Cloud, when an app first needs it.** Add the value as an environment secret named
-`<APPNAME>_<VAR>` (app name upper-cased, `-` as `_`, e.g. `BUILD_TRACKER_INGEST_TOKEN`) under **Settings →
+`<APPNAME>_<VAR>` (app name upper-cased, `-` as `_`, e.g. `BUILD_TRACKER_INGEST_TOKEN`; if `<VAR>` already starts with
+`<APPNAME>_`, the secret is just `<VAR>`, e.g. `COST_SCALER_REFRESH_TOKEN`) under **Settings →
 Environments → production**, then map that one secret explicitly in the cloud's Apply job and pass it to Terraform:
 
 ```yaml
@@ -218,10 +220,48 @@ Environments → production**, then map that one secret explicitly in the cloud'
 Each secret is named one by one on purpose: handing the whole `secrets` context to a script would expose every
 production secret (and GitHub flags such workflows as possibly malicious).
 
+**Google Cloud is wired for `cost-scaler`** (app 31). The Apply gcp job's "Per-app secrets" step names exactly two
+secrets, `COST_SCALER_GCP_PRICING_API_KEY` and `COST_SCALER_REFRESH_TOKEN`, and drops any that is empty, so a missing
+secret never fails the apply: the app starts without it (without the Google key it prices AWS, Azure and Oracle and
+shows Google Cloud as "prices unavailable"). The values are never printed: Terraform marks the variable sensitive, the
+file holding them is written with mode 600 and removed in an `always()` step. They reach the app as plain Cloud Run
+environment variables (visible to project members who can read the service) and sit in the private state bucket,
+as the database password does. Secret Manager was not used because the deploy identity cannot grant IAM roles
+(`secretmanager.secretAccessor`) without widening its rights. To wire another Google Cloud app, add its secrets to
+that step and list their names under `secrets:` in `apps.yaml`.
+
 Changing a value takes effect on the next deploy (AWS: `bash -s -- deploy` of the autodeploy bootstrap, or rerun
 `deploy/aws.sh` in CloudShell, because the deployer only reacts to new commits; merge to `main` for Azure and
 Google Cloud once wired). Pull-request plans don't have the values, so a plan after secrets exist may show them as changing.
 Terraform state holds the values like it holds the database password, in each cloud's private state bucket.
+
+## Request timeout (Google Cloud)
+
+An app may set `timeout` in `apps.yaml` to change its Cloud Run request timeout:
+
+```yaml
+    timeout: 300s
+```
+
+Whole seconds with an `s`, from `1s` to `300s`; leave it out for the default `30s`. Anything else (`301s`, `5m`, `300`,
+`null`) fails the plan with a message naming the app. Only Google Cloud reads it. Apps without it keep `30s`, so adding the
+setting changes nothing for them. A longer timeout lets one request hold the app's single instance longer, so give it
+only to apps that need it (app 31's price refresh does).
+
+## Nightly refresh for Cloud Cost Scaler (Google Cloud)
+
+Once `cost-scaler` is deployed to Google Cloud with `COST_SCALER_REFRESH_TOKEN` in its `secrets:` and the GitHub
+secret set, Terraform creates a second Cloud Scheduler job, `cost-scaler-refresh`: `POST <run.app URL>/api/prices/refresh`
+with `Authorization: Bearer <token>`, schedule `5,15,25,35,45,55 7 * * *` UTC (six fires, one price source per call),
+no retries. Until all three are true no job exists. The free tier is 3 jobs per billing account; with the Build
+Tracker's `build-tracker-sync` that is 2 of 3 (fires within a job are not billed).
+
+**What Michael creates** (names only; values never go in the repo or in chat):
+
+| Where | Name | Value |
+| --- | --- | --- |
+| GitHub, Settings, Environments, `production`, secret | `COST_SCALER_REFRESH_TOKEN` | `openssl rand -hex 32` |
+| GitHub, Settings, Environments, `production`, secret | `COST_SCALER_GCP_PRICING_API_KEY` | API key restricted to the Cloud Billing API (optional; without it Google Cloud prices show as unavailable) |
 
 ## Custom domains and DNS (Cloudflare)
 

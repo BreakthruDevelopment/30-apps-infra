@@ -283,10 +283,20 @@ resource "google_cloud_run_v2_service" "app" {
   deletion_protection = false
   labels              = local.labels
 
+  # Validates the optional per-app `timeout` in apps.yaml (a precondition on the existing service, so no
+  # new resource appears in any plan): whole seconds with an "s" suffix, 1 to 300. Cloud Run's own maximum is
+  # 3600 s; 300 s is this repo's cap so a request can never hold the single free instance for long.
+  lifecycle {
+    precondition {
+      condition     = try(can(regex("^[0-9]{1,3}s$", tostring(each.value.timeout))) && tonumber(trimsuffix(each.value.timeout, "s")) >= 1 && tonumber(trimsuffix(each.value.timeout, "s")) <= 300, !contains(keys(each.value), "timeout"))
+      error_message = "App ${each.key}: timeout must be a string of whole seconds from 1s to 300s (for example 300s); the default is 30s."
+    }
+  }
+
   template {
     service_account                  = google_service_account.run.email
     max_instance_request_concurrency = 40
-    timeout                          = "30s"
+    timeout                          = try(each.value.timeout, "30s")
 
     scaling {
       min_instance_count = 0
