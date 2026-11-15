@@ -225,9 +225,15 @@ secrets, `COST_SCALER_GCP_PRICING_API_KEY` and `COST_SCALER_REFRESH_TOKEN`, and 
 secret never fails the apply: the app starts without it (without the Google key it prices AWS, Azure and Oracle and
 shows Google Cloud as "prices unavailable"). The values are never printed: Terraform marks the variable sensitive, the
 file holding them is written with mode 600 and removed in an `always()` step. They reach the app as plain Cloud Run
-environment variables (visible to project members who can read the service) and sit in the private state bucket,
-as the database password does. Secret Manager was not used because the deploy identity cannot grant IAM roles
-(`secretmanager.secretAccessor`) without widening its rights. To wire another Google Cloud app, add its secrets to
+environment variables, matching how the database password and the other per-app secrets already work here; Secret Manager
+would be stronger, and the deploy identity could use it (`bootstrap/gcp.sh` gives it `roles/secretmanager.admin`), but
+keeping the existing pattern is an accepted trade-off for this portfolio. Who can read the values: anyone with
+`run.services.get` on the service (`roles/viewer` includes it), anyone with `cloudscheduler.jobs.get` (the refresh job
+carries the token in its `Authorization` header), anyone who can read the Terraform state bucket (plaintext, versioned),
+and the plan service account that `pull_request` runs in this repo can assume (`roles/viewer` plus read access to the
+state bucket, `bootstrap/gcp.sh`), which in practice means anyone who can push a branch here. The blast radius is small
+on purpose: the refresh token only triggers a rate-limited, idempotent price refresh, and the pricing key is restricted
+to the Cloud Billing API. To wire another Google Cloud app, add its secrets to
 that step and list their names under `secrets:` in `apps.yaml`.
 
 Changing a value takes effect on the next deploy (AWS: `bash -s -- deploy` of the autodeploy bootstrap, or rerun

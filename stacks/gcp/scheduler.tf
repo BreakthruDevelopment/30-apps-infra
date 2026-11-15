@@ -119,4 +119,11 @@ resource "google_cloud_scheduler_job" "cost_scaler_refresh" {
   }
 
   depends_on = [google_project_service.cloudscheduler]
+
+  lifecycle {
+    precondition {
+      condition     = try(tonumber(trimsuffix(local.run_timeout[var.refresh_app], "s")) >= 240, false)
+      error_message = "The ${var.refresh_app} refresh job needs the app's Cloud Run timeout to be at least 240s (the app's fetch deadline), but apps.yaml gives it ${try(local.run_timeout[var.refresh_app], "no timeout")}. Set `timeout: 300s` on the app."
+    }
+  }
 }
