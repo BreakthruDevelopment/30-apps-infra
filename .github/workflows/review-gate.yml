@@ -1,0 +1,13 @@
+name: Review gate
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+permissions:
+  contents: read
+  pull-requests: read
+  actions: write # lets the gate re-run the pull_request run after a review
+jobs:
+  review:
+    uses: BreakthruDevelopment/ai-dev-os/.github/workflows/review-gate.yml@main
