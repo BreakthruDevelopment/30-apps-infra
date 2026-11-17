@@ -105,3 +105,12 @@ apps:
     tag: sha-3fd1ca2
     domain: app11.breakthruventures.ai
     ai: gemini
+  - name: cost-scaler
+    title: Cloud Cost Scaler
+    clouds: [gcp]
+    image: ghcr.io/breakthrudevelopment/31-cost-scaler
+    tag: sha-9d23e20
+    domain: null
+    ai: gemini
+    timeout: 300s
+    secrets: [COST_SCALER_REFRESH_TOKEN, COST_SCALER_GCP_PRICING_API_KEY]
